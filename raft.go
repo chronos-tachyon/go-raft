@@ -427,7 +427,12 @@ func (n *Node) becomeCandidate() {
 	n.currentNonce = 0
 	n.yeaVotes = make(map[packet.NodeId]struct{}, len(n.peers))
 	n.yeaVotes[n.self] = struct{}{}
-	n.sendNotVoted(packet.VoteRequest{n.currentTerm})
+	if len(n.yeaVotes) >= n.Quorum() {
+		n.state = leader
+		n.sendNotVoted(packet.HeartbeatRequest{n.currentTerm, n.currentNonce})
+	} else {
+		n.sendNotVoted(packet.VoteRequest{n.currentTerm})
+	}
 }
 
 func equalUDPAddr(a, b *net.UDPAddr) bool {
