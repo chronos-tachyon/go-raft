@@ -4,21 +4,12 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net"
 	"sync/atomic"
 	"time"
 
 	"github.com/chronos-tachyon/go-raft"
 	"github.com/chronos-tachyon/go-raft/packet"
 )
-
-func mustResolveUDPAddr(n, a string) *net.UDPAddr {
-	addr, err := net.ResolveUDPAddr(n, a)
-	if err != nil {
-		panic(err)
-	}
-	return addr
-}
 
 var counter uint32
 
@@ -49,21 +40,32 @@ func LoseLeadership(node *raft.Node) {
 	fmt.Printf("OLD LEADER: %v\n", node)
 }
 
+const configuration = `
+---
+nodes:
+  - id: 1
+    addr: localhost:9001
+  - id: 2
+    addr: localhost:9002
+  - id: 3
+    addr: localhost:9003
+  - id: 4
+    addr: localhost:9004
+  - id: 5
+    addr: localhost:9005
+`
+
 func main() {
 	rand.Seed(0x56f2fb72)
 	raft.SetFaultInjectorFunction(MyFaultInjector)
 
-	peerlist := []raft.Peer{
-		raft.Peer{Id: 1, Addr: mustResolveUDPAddr("udp", "localhost:9001")},
-		raft.Peer{Id: 2, Addr: mustResolveUDPAddr("udp", "localhost:9002")},
-		raft.Peer{Id: 3, Addr: mustResolveUDPAddr("udp", "localhost:9003")},
-		raft.Peer{Id: 4, Addr: mustResolveUDPAddr("udp", "localhost:9004")},
-		raft.Peer{Id: 5, Addr: mustResolveUDPAddr("udp", "localhost:9005")},
+	cfg, err := raft.ParseConfig([]byte(configuration))
+	if err != nil {
+		log.Fatalf("fatal: %v", err)
 	}
-
-	nodes := make([]*raft.Node, 0, len(peerlist))
-	for _, peer := range peerlist {
-		node, err := raft.New(peer.Id, peerlist)
+	nodes := make([]*raft.Node, 0, len(cfg.Nodes))
+	for _, item := range cfg.Nodes {
+		node, err := raft.New(cfg, item.Id)
 		if err != nil {
 			log.Fatalf("fatal: %v", err)
 		}

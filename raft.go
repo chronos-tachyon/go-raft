@@ -21,14 +21,14 @@ const (
 	leader
 )
 
-type Peer struct {
-	Id   packet.NodeId
-	Addr *net.UDPAddr
+type peer struct {
+	id   packet.NodeId
+	addr *net.UDPAddr
 }
 
 type Node struct {
 	self  packet.NodeId
-	peers map[packet.NodeId]Peer
+	peers map[packet.NodeId]peer
 	conn  *net.UDPConn
 
 	mutex         sync.Mutex
@@ -66,26 +66,21 @@ type Node struct {
  */
 
 // New constructs a new Node.
-func New(self packet.NodeId, peers []Peer) (*Node, error) {
-	peermap := make(map[packet.NodeId]Peer, len(peers))
-	for _, peer := range peers {
-		if peer.Id == 0 {
-			panic("invalid NodeId")
-		}
-		if _, found := peermap[peer.Id]; found {
-			panic("duplicate NodeId")
-		}
-		peermap[peer.Id] = peer
+func New(cfg *Config, self uint8) (*Node, error) {
+	selfid := packet.NodeId(self)
+	peermap, err := cfg.verify()
+	if err != nil {
+		return nil, err
 	}
-	if _, found := peermap[self]; !found {
-		panic("missing self NodeId in peer list")
+	if _, found := peermap[selfid]; !found {
+		return nil, fmt.Errorf("missing self id %d", selfid)
 	}
-	conn, err := net.ListenUDP("udp", peermap[self].Addr)
+	conn, err := net.ListenUDP("udp", peermap[selfid].addr)
 	if err != nil {
 		return nil, err
 	}
 	n := &Node{
-		self:  self,
+		self:  selfid,
 		peers: peermap,
 		conn:  conn,
 		state: follower,
@@ -93,6 +88,11 @@ func New(self packet.NodeId, peers []Peer) (*Node, error) {
 	}
 	go n.loop()
 	return n, nil
+}
+
+// Id returns the identifier for this node.
+func (n *Node) Id() packet.NodeId {
+	return n.self
 }
 
 // Quorum returns the number of peers required to form a quorum.
@@ -158,8 +158,8 @@ func (n *Node) String() string {
 		panic("unknown state")
 	}
 	return fmt.Sprintf("%d[%c %d %03d/%02d %s %d %d]", n.self, ch,
-		n.currentTerm, n.time0, n.time1, yeaVotesToString(n.peers,
-			n.yeaVotes), n.votedFor, n.currentLeader)
+		n.currentTerm, n.time0, n.time1, n.yeaVotesToString(),
+		n.votedFor, n.currentLeader)
 }
 
 // Close releases the resources associated with this Node.
@@ -178,8 +178,8 @@ func (n *Node) loop() {
 		packet := packet.Unpack(buf[:num])
 		if packet != nil {
 			for _, peer := range n.peers {
-				if equalUDPAddr(addr, peer.Addr) {
-					n.recv(peer.Id, packet)
+				if equalUDPAddr(addr, peer.addr) {
+					n.recv(peer.id, packet)
 					break
 				}
 			}
@@ -210,7 +210,7 @@ func (n *Node) send(to packet.NodeId, p packet.Packet) {
 	}
 	buf := p.Pack()
 	peer := n.peers[to]
-	_, err := n.conn.WriteToUDP(buf, peer.Addr)
+	_, err := n.conn.WriteToUDP(buf, peer.addr)
 	if err != nil {
 		log.Printf("raft: %v", err)
 	}
@@ -218,16 +218,16 @@ func (n *Node) send(to packet.NodeId, p packet.Packet) {
 
 func (n *Node) sendNotVoted(p packet.Packet) {
 	for _, peer := range n.peers {
-		if _, found := n.yeaVotes[peer.Id]; !found {
-			n.send(peer.Id, p)
+		if _, found := n.yeaVotes[peer.id]; !found {
+			n.send(peer.id, p)
 		}
 	}
 }
 
 func (n *Node) sendAllButSelfAndSource(from packet.NodeId, p packet.Packet) {
 	for _, peer := range n.peers {
-		if peer.Id != n.self && peer.Id != from {
-			n.send(peer.Id, p)
+		if peer.id != n.self && peer.id != from {
+			n.send(peer.id, p)
 		}
 	}
 }
@@ -445,15 +445,15 @@ func (x byId) Len() int           { return len(x) }
 func (x byId) Less(i, j int) bool { return x[i] < x[j] }
 func (x byId) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
 
-func yeaVotesToString(peers map[packet.NodeId]Peer, votes map[packet.NodeId]struct{}) string {
-	idList := make([]packet.NodeId, 0, len(peers))
-	for id := range peers {
+func (n *Node) yeaVotesToString() string {
+	idList := make([]packet.NodeId, 0, len(n.peers))
+	for id := range n.peers {
 		idList = append(idList, id)
 	}
 	sort.Sort(byId(idList))
 	var buf bytes.Buffer
 	for _, id := range idList {
-		if _, found := votes[id]; found {
+		if _, found := n.yeaVotes[id]; found {
 			fmt.Fprintf(&buf, "%d", id)
 		} else {
 			buf.Write([]byte("."))
