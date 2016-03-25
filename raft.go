@@ -123,7 +123,7 @@ func (n *Node) RemovePeer(peerId uint8) error {
 	if _, found := n.peers[id]; !found {
 		return fmt.Errorf("no such id: %d", id)
 	}
-	delete(n.peers, found)
+	delete(n.peers, id)
 	return nil
 }
 
