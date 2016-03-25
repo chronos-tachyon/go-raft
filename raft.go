@@ -21,14 +21,9 @@ const (
 	leader
 )
 
-type peer struct {
-	id   packet.NodeId
-	addr *net.UDPAddr
-}
-
 type Node struct {
 	self  packet.NodeId
-	peers map[packet.NodeId]peer
+	peers map[packet.NodeId]*net.UDPAddr
 	conn  *net.UDPConn
 
 	wg            sync.WaitGroup
@@ -84,7 +79,7 @@ func New(cfg *Config, self uint8) (*Node, error) {
 
 // Start acquires the resources needed for this Node.
 func (n *Node) Start() error {
-	conn, err := net.ListenUDP("udp", n.peers[n.self].addr)
+	conn, err := net.ListenUDP("udp", n.peers[n.self])
 	if err != nil {
 		return err
 	}
@@ -178,18 +173,27 @@ func (n *Node) String() string {
 func (n *Node) loop() {
 	var buf [16]byte
 	for {
-		num, addr, err := n.conn.ReadFromUDP(buf[:])
+		size, pktAddr, err := n.conn.ReadFromUDP(buf[:])
 		if err != nil {
-			log.Printf("raft: %v", err)
+			operr, ok := err.(*net.OpError)
+			if !ok || operr.Op != "read" || operr.Err.Error() != "use of closed network connection" {
+				log.Printf("raft: %#v", err)
+			}
 			break
 		}
-		packet := packet.Unpack(buf[:num])
-		if packet != nil {
-			for _, peer := range n.peers {
-				if equalUDPAddr(addr, peer.addr) {
-					n.recv(peer.id, packet)
+		pkt := packet.Unpack(buf[:size])
+		if pkt != nil {
+			var pktId packet.NodeId
+			n.mutex.Lock()
+			for id, addr := range n.peers {
+				if equalUDPAddr(pktAddr, addr) {
+					pktId = id
 					break
 				}
+			}
+			n.mutex.Unlock()
+			if pktId != 0 {
+				n.recv(pktId, pkt)
 			}
 		}
 	}
@@ -218,25 +222,25 @@ func (n *Node) send(to packet.NodeId, p packet.Packet) {
 		return
 	}
 	buf := p.Pack()
-	peer := n.peers[to]
-	_, err := n.conn.WriteToUDP(buf, peer.addr)
+	addr := n.peers[to]
+	_, err := n.conn.WriteToUDP(buf, addr)
 	if err != nil {
 		log.Printf("raft: %v", err)
 	}
 }
 
 func (n *Node) sendNotVoted(p packet.Packet) {
-	for _, peer := range n.peers {
-		if _, found := n.yeaVotes[peer.id]; !found {
-			n.send(peer.id, p)
+	for id := range n.peers {
+		if _, found := n.yeaVotes[id]; !found {
+			n.send(id, p)
 		}
 	}
 }
 
 func (n *Node) sendAllButSelfAndSource(from packet.NodeId, p packet.Packet) {
-	for _, peer := range n.peers {
-		if peer.id != n.self && peer.id != from {
-			n.send(peer.id, p)
+	for id := range n.peers {
+		if id != n.self && id != from {
+			n.send(id, p)
 		}
 	}
 }
@@ -471,11 +475,11 @@ func (n *Node) yeaVotesToString() string {
 	return buf.String()
 }
 
-func processConfig(cfg *Config) (map[packet.NodeId]peer, error) {
+func processConfig(cfg *Config) (map[packet.NodeId]*net.UDPAddr, error) {
 	if len(cfg.Nodes) == 0 {
 		return nil, fmt.Errorf("must configure at least one Raft node")
 	}
-	result := make(map[packet.NodeId]peer, len(cfg.Nodes))
+	result := make(map[packet.NodeId]*net.UDPAddr, len(cfg.Nodes))
 	for _, item := range cfg.Nodes {
 		id := packet.NodeId(item.Id)
 		if id == 0 {
@@ -489,7 +493,7 @@ func processConfig(cfg *Config) (map[packet.NodeId]peer, error) {
 		if err != nil {
 			return nil, err
 		}
-		result[id] = peer{id, addr}
+		result[id] = addr
 	}
 	return result, nil
 }
