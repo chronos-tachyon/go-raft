@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
+	"os/signal"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/chronos-tachyon/go-raft"
@@ -77,12 +80,27 @@ func main() {
 		}
 		nodes = append(nodes, node)
 	}
+
+	var signaled uint32
+
+	sigch := make(chan os.Signal, 1)
+	signal.Notify(sigch, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigch)
+	go (func() {
+		sig := <-sigch
+		log.Printf("got signal %v", sig)
+		atomic.AddUint32(&signaled, 1)
+	})()
+
 	fmt.Printf("%v\n", nodes)
-	for {
+	for atomic.LoadUint32(&signaled) == 0 {
 		time.Sleep(5 * time.Millisecond)
 		for _, node := range nodes {
 			node.Tick()
 		}
 		fmt.Printf("%v\n", nodes)
+	}
+	for _, node := range nodes {
+		node.Stop()
 	}
 }
