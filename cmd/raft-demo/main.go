@@ -16,6 +16,14 @@ import (
 
 var counter uint32
 
+var faultMatrix = map[packet.NodeId]map[packet.NodeId]bool{
+	1: map[packet.NodeId]bool{1: false, 2: false, 3: false, 4: false, 5: false},
+	2: map[packet.NodeId]bool{1: false, 2: false, 3: false, 4: false, 5: false},
+	3: map[packet.NodeId]bool{1: false, 2: false, 3: false, 4: false, 5: true},
+	4: map[packet.NodeId]bool{1: false, 2: false, 3: false, 4: false, 5: false},
+	5: map[packet.NodeId]bool{1: false, 2: false, 3: true, 4: false, 5: false},
+}
+
 func MyFaultInjector(from, to packet.NodeId) bool {
 	n := atomic.AddUint32(&counter, 1)
 	if n < 100 {
@@ -23,10 +31,10 @@ func MyFaultInjector(from, to packet.NodeId) bool {
 	}
 	if n == 100 {
 		fmt.Println("BANG!")
-		return (from == 3 && to == 5) || (from == 5 && to == 3)
+		return faultMatrix[from][to]
 	}
 	if n < 1000 {
-		return (from == 3 && to == 5) || (from == 5 && to == 3)
+		return faultMatrix[from][to]
 	}
 	if n == 1000 {
 		fmt.Println("FIXED!")
@@ -41,6 +49,14 @@ func GainLeadership(node *raft.Node) {
 
 func LoseLeadership(node *raft.Node) {
 	fmt.Printf("OLD LEADER: %v\n", node)
+}
+
+func Lonely(node *raft.Node) {
+	fmt.Printf("SO LONELY! %v\n", node)
+}
+
+func NotLonely(node *raft.Node) {
+	fmt.Printf("WE'RE BACK! %v\n", node)
 }
 
 const configuration = `
@@ -74,6 +90,8 @@ func main() {
 		}
 		node.OnGainLeadership(GainLeadership)
 		node.OnLoseLeadership(LoseLeadership)
+		node.OnLonely(Lonely)
+		node.OnNotLonely(NotLonely)
 		err = node.Start()
 		if err != nil {
 			log.Fatalf("fatal: %v", err)

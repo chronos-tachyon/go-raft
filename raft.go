@@ -21,24 +21,30 @@ const (
 	leader
 )
 
+// Node represents a single participant in a Raft network.
 type Node struct {
 	self  packet.NodeId
 	peers map[packet.NodeId]*net.UDPAddr
 	conn  *net.UDPConn
 
-	wg            sync.WaitGroup
-	mutex         sync.Mutex
-	state         state
-	votedFor      packet.NodeId
-	currentLeader packet.NodeId
-	currentTerm   packet.Term
-	time0         uint32
-	time1         uint32
-	currentNonce  uint32
-	yeaVotes      map[packet.NodeId]struct{}
+	wg             sync.WaitGroup
+	mutex          sync.Mutex
+	state          state
+	votedFor       packet.NodeId
+	currentLeader  packet.NodeId
+	currentTerm    packet.Term
+	lastLeaderTerm packet.Term
+	time0          uint32
+	time1          uint32
+	currentNonce   uint32
+	yeaVotes       map[packet.NodeId]struct{}
+
+	inLonelyState bool
 
 	onGainLeadership func(*Node)
 	onLoseLeadership func(*Node)
+	onLonely         func(*Node)
+	onNotLonely         func(*Node)
 }
 
 /*
@@ -152,6 +158,18 @@ func (n *Node) OnGainLeadership(fn func(*Node)) {
 func (n *Node) OnLoseLeadership(fn func(*Node)) {
 	n.mutex.Lock()
 	n.onLoseLeadership = fn
+	n.mutex.Unlock()
+}
+
+func (n *Node) OnLonely(fn func(*Node)) {
+	n.mutex.Lock()
+	n.onLonely = fn
+	n.mutex.Unlock()
+}
+
+func (n *Node) OnNotLonely(fn func(*Node)) {
+	n.mutex.Lock()
+	n.onNotLonely = fn
 	n.mutex.Unlock()
 }
 
@@ -299,15 +317,19 @@ func (n *Node) recv(from packet.NodeId, p packet.Packet) {
 	default:
 		panic(fmt.Sprintf("unknown type %T", p))
 	}
-	var fn func(*Node)
+	var fns []func(*Node)
+	if n.inLonelyState && n.currentLeader != 0 {
+		fns = append(fns, n.onNotLonely)
+		n.inLonelyState = false
+	}
 	switch {
 	case n.state == leader && origState != leader:
-		fn = n.onGainLeadership
+		fns = append(fns, n.onGainLeadership)
 	case n.state != leader && origState == leader:
-		fn = n.onLoseLeadership
+		fns = append(fns, n.onLoseLeadership)
 	}
 	n.mutex.Unlock()
-	if fn != nil {
+	for _, fn := range fns {
 		fn(n)
 	}
 }
@@ -340,6 +362,7 @@ func (n *Node) recvVoteResponse(from packet.NodeId, r packet.VoteResponse) {
 		if len(n.yeaVotes) >= n.Quorum() {
 			n.state = leader
 			n.currentLeader = n.self
+			n.lastLeaderTerm = n.currentTerm
 			n.time0 = 50 + uint32(rand.Intn(100))
 			n.time1 = 5 + uint32(rand.Intn(10))
 			n.currentNonce = 0
@@ -358,12 +381,14 @@ func (n *Node) recvHeartbeatRequest(from packet.NodeId, r packet.HeartbeatReques
 		n.votedFor = from
 		n.currentLeader = from
 		n.currentTerm = r.Term
+		n.lastLeaderTerm = n.currentTerm
 		success = true
 
 	case r.Term == n.currentTerm && n.state != leader:
 		n.becomeFollower()
 		n.votedFor = from
 		n.currentLeader = from
+		n.lastLeaderTerm = n.currentTerm
 		success = true
 	}
 	n.send(from, packet.HeartbeatResponse{n.currentTerm, r.Nonce, success})
@@ -403,11 +428,13 @@ func (n *Node) recvInformRequest(from packet.NodeId, r packet.InformRequest) {
 		n.becomeFollower()
 		n.currentTerm = r.Term
 		n.currentLeader = r.Leader
+		n.lastLeaderTerm = n.currentTerm
 		n.send(from, packet.NominateRequest{n.currentTerm})
 
 	case r.Term == n.currentTerm && n.currentLeader != r.Leader:
 		n.becomeFollower()
 		n.currentLeader = r.Leader
+		n.lastLeaderTerm = n.currentTerm
 		n.send(from, packet.NominateRequest{n.currentTerm})
 	}
 }
@@ -442,6 +469,9 @@ func (n *Node) Tick() {
 		fn = n.onGainLeadership
 	case n.state != leader && origState == leader:
 		fn = n.onLoseLeadership
+	case n.currentTerm >= n.lastLeaderTerm + 2 && !n.inLonelyState:
+		fn = n.onLonely
+		n.inLonelyState = true
 	}
 	n.mutex.Unlock()
 	if fn != nil {
