@@ -71,6 +71,10 @@ func main() {
 		}
 		node.OnGainLeadership(GainLeadership)
 		node.OnLoseLeadership(LoseLeadership)
+		err = node.Start()
+		if err != nil {
+			log.Fatalf("fatal: %v", err)
+		}
 		nodes = append(nodes, node)
 	}
 	fmt.Printf("%v\n", nodes)

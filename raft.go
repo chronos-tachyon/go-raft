@@ -31,6 +31,7 @@ type Node struct {
 	peers map[packet.NodeId]peer
 	conn  *net.UDPConn
 
+	wg            sync.WaitGroup
 	mutex         sync.Mutex
 	state         state
 	votedFor      packet.NodeId
@@ -75,19 +76,31 @@ func New(cfg *Config, self uint8) (*Node, error) {
 	if _, found := peermap[selfid]; !found {
 		return nil, fmt.Errorf("missing self id %d", selfid)
 	}
-	conn, err := net.ListenUDP("udp", peermap[selfid].addr)
-	if err != nil {
-		return nil, err
-	}
-	n := &Node{
+	return &Node{
 		self:  selfid,
 		peers: peermap,
-		conn:  conn,
-		state: follower,
-		time0: 5 + uint32(rand.Intn(10)),
+	}, nil
+}
+
+// Start acquires the resources needed for this Node.
+func (n *Node) Start() error {
+	conn, err := net.ListenUDP("udp", n.peers[n.self].addr)
+	if err != nil {
+		return err
 	}
+	n.conn = conn
+	n.state = follower
+	n.time0 = 5 + uint32(rand.Intn(10))
+	n.wg.Add(1)
 	go n.loop()
-	return n, nil
+	return nil
+}
+
+// Stop releases the resources associated with this Node.
+func (n *Node) Stop() error {
+	err := n.conn.Close()
+	n.wg.Wait()
+	return err
 }
 
 // Id returns the identifier for this node.
@@ -162,11 +175,6 @@ func (n *Node) String() string {
 		n.votedFor, n.currentLeader)
 }
 
-// Close releases the resources associated with this Node.
-func (n *Node) Close() error {
-	return n.conn.Close()
-}
-
 func (n *Node) loop() {
 	var buf [16]byte
 	for {
@@ -186,6 +194,7 @@ func (n *Node) loop() {
 		}
 	}
 	n.conn.Close()
+	n.wg.Done()
 }
 
 var faultInjectorMutex sync.Mutex
