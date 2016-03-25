@@ -71,10 +71,7 @@ func New(cfg *Config, self uint8) (*Node, error) {
 	if _, found := peermap[selfid]; !found {
 		return nil, fmt.Errorf("missing self id %d", selfid)
 	}
-	return &Node{
-		self:  selfid,
-		peers: peermap,
-	}, nil
+	return &Node{self: selfid, peers: peermap}, nil
 }
 
 // Start acquires the resources needed for this Node.
@@ -96,6 +93,38 @@ func (n *Node) Stop() error {
 	err := n.conn.Close()
 	n.wg.Wait()
 	return err
+}
+
+func (n *Node) AddPeer(peerId uint8, peerAddr string) error {
+	id := packet.NodeId(peerId)
+	addr, err := net.ResolveUDPAddr("udp", peerAddr)
+	if err != nil {
+		return err
+	}
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+	if id == 0 {
+		return fmt.Errorf("invalid id: 0")
+	}
+	if _, found := n.peers[id]; found {
+		return fmt.Errorf("duplicate id: %d", id)
+	}
+	n.peers[id] = addr
+	return nil
+}
+
+func (n *Node) RemovePeer(peerId uint8) error {
+	id := packet.NodeId(peerId)
+	if id == n.self {
+		return fmt.Errorf("cannot remove self id: %d", id)
+	}
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+	if _, found := n.peers[id]; !found {
+		return fmt.Errorf("no such id: %d", id)
+	}
+	delete(n.peers, found)
+	return nil
 }
 
 // Id returns the identifier for this node.
