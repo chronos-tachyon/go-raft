@@ -68,7 +68,7 @@ type Node struct {
 // New constructs a new Node.
 func New(cfg *Config, self uint8) (*Node, error) {
 	selfid := packet.NodeId(self)
-	peermap, err := cfg.verify()
+	peermap, err := processConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -460,4 +460,27 @@ func (n *Node) yeaVotesToString() string {
 		}
 	}
 	return buf.String()
+}
+
+func processConfig(cfg *Config) (map[packet.NodeId]peer, error) {
+	if len(cfg.Nodes) == 0 {
+		return nil, fmt.Errorf("must configure at least one Raft node")
+	}
+	result := make(map[packet.NodeId]peer, len(cfg.Nodes))
+	for _, item := range cfg.Nodes {
+		id := packet.NodeId(item.Id)
+		if id == 0 {
+			return nil, fmt.Errorf("invalid id: 0")
+		}
+		_, found := result[id]
+		if found {
+			return nil, fmt.Errorf("duplicate id: %d", id)
+		}
+		addr, err := net.ResolveUDPAddr("udp", item.Addr)
+		if err != nil {
+			return nil, err
+		}
+		result[id] = peer{id, addr}
+	}
+	return result, nil
 }
