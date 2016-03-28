@@ -44,7 +44,7 @@ type Node struct {
 	onGainLeadership func(*Node)
 	onLoseLeadership func(*Node)
 	onLonely         func(*Node)
-	onNotLonely         func(*Node)
+	onNotLonely      func(*Node)
 }
 
 /*
@@ -130,6 +130,7 @@ func (n *Node) RemovePeer(peerId uint8) error {
 		return fmt.Errorf("no such id: %d", id)
 	}
 	delete(n.peers, id)
+	delete(n.yeaVotes, id)
 	return nil
 }
 
@@ -469,7 +470,7 @@ func (n *Node) Tick() {
 		fn = n.onGainLeadership
 	case n.state != leader && origState == leader:
 		fn = n.onLoseLeadership
-	case n.currentTerm >= n.lastLeaderTerm + 2 && !n.inLonelyState:
+	case n.currentTerm >= n.lastLeaderTerm+2 && !n.inLonelyState:
 		fn = n.onLonely
 		n.inLonelyState = true
 	}
