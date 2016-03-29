@@ -5,10 +5,10 @@ import (
 )
 
 type Config struct {
-	Nodes []NodeConfig
+	Peers []PeerConfig
 }
 
-type NodeConfig struct {
+type PeerConfig struct {
 	Id   uint8
 	Addr string
 }

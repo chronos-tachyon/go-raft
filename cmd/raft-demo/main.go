@@ -16,15 +16,15 @@ import (
 
 var counter uint32
 
-var faultMatrix = map[packet.NodeId]map[packet.NodeId]bool{
-	1: map[packet.NodeId]bool{1: false, 2: false, 3: false, 4: false, 5: false},
-	2: map[packet.NodeId]bool{1: false, 2: false, 3: false, 4: false, 5: false},
-	3: map[packet.NodeId]bool{1: false, 2: false, 3: false, 4: false, 5: true},
-	4: map[packet.NodeId]bool{1: false, 2: false, 3: false, 4: false, 5: false},
-	5: map[packet.NodeId]bool{1: false, 2: false, 3: true, 4: false, 5: false},
+var faultMatrix = map[packet.PeerId]map[packet.PeerId]bool{
+	1: map[packet.PeerId]bool{1: false, 2: false, 3: false, 4: false, 5: false},
+	2: map[packet.PeerId]bool{1: false, 2: false, 3: false, 4: false, 5: false},
+	3: map[packet.PeerId]bool{1: false, 2: false, 3: false, 4: false, 5: true},
+	4: map[packet.PeerId]bool{1: false, 2: false, 3: false, 4: false, 5: false},
+	5: map[packet.PeerId]bool{1: false, 2: false, 3: true, 4: false, 5: false},
 }
 
-func MyFaultInjector(from, to packet.NodeId) bool {
+func MyFaultInjector(from, to packet.PeerId) bool {
 	n := atomic.AddUint32(&counter, 1)
 	if n < 100 {
 		return false
@@ -43,25 +43,25 @@ func MyFaultInjector(from, to packet.NodeId) bool {
 	return false
 }
 
-func GainLeadership(node *raft.Node) {
-	fmt.Printf("NEW LEADER: %v\n", node)
+func GainLeadership(peer *raft.Raft) {
+	fmt.Printf("NEW LEADER: %v\n", peer)
 }
 
-func LoseLeadership(node *raft.Node) {
-	fmt.Printf("OLD LEADER: %v\n", node)
+func LoseLeadership(peer *raft.Raft) {
+	fmt.Printf("OLD LEADER: %v\n", peer)
 }
 
-func Lonely(node *raft.Node) {
-	fmt.Printf("SO LONELY! %v\n", node)
+func Lonely(peer *raft.Raft) {
+	fmt.Printf("SO LONELY! %v\n", peer)
 }
 
-func NotLonely(node *raft.Node) {
-	fmt.Printf("WE'RE BACK! %v\n", node)
+func NotLonely(peer *raft.Raft) {
+	fmt.Printf("WE'RE BACK! %v\n", peer)
 }
 
 const configuration = `
 ---
-nodes:
+peers:
   - id: 1
     addr: localhost:9001
   - id: 2
@@ -82,21 +82,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("fatal: %v", err)
 	}
-	nodes := make([]*raft.Node, 0, len(cfg.Nodes))
-	for _, item := range cfg.Nodes {
-		node, err := raft.New(cfg, item.Id)
+	peers := make([]*raft.Raft, 0, len(cfg.Peers))
+	for _, item := range cfg.Peers {
+		peer, err := raft.New(cfg, item.Id)
 		if err != nil {
 			log.Fatalf("fatal: %v", err)
 		}
-		node.OnGainLeadership(GainLeadership)
-		node.OnLoseLeadership(LoseLeadership)
-		node.OnLonely(Lonely)
-		node.OnNotLonely(NotLonely)
-		err = node.Start()
+		peer.OnGainLeadership(GainLeadership)
+		peer.OnLoseLeadership(LoseLeadership)
+		peer.OnLonely(Lonely)
+		peer.OnNotLonely(NotLonely)
+		err = peer.Start()
 		if err != nil {
 			log.Fatalf("fatal: %v", err)
 		}
-		nodes = append(nodes, node)
+		peers = append(peers, peer)
 	}
 
 	var signaled uint32
@@ -110,15 +110,15 @@ func main() {
 		atomic.AddUint32(&signaled, 1)
 	})()
 
-	fmt.Printf("%v\n", nodes)
+	fmt.Printf("%v\n", peers)
 	for atomic.LoadUint32(&signaled) == 0 {
 		time.Sleep(5 * time.Millisecond)
-		for _, node := range nodes {
-			node.Tick()
+		for _, peer := range peers {
+			peer.Tick()
 		}
-		fmt.Printf("%v\n", nodes)
+		fmt.Printf("%v\n", peers)
 	}
-	for _, node := range nodes {
-		node.Stop()
+	for _, peer := range peers {
+		peer.Stop()
 	}
 }

@@ -5,7 +5,7 @@ import (
 	"hash/crc32"
 )
 
-type NodeId uint8
+type PeerId uint8
 type Term uint32
 
 type Packet interface {
@@ -82,7 +82,7 @@ func (r NominateRequest) Pack() []byte {
 
 type InformRequest struct {
 	Term   Term
-	Leader NodeId
+	Leader PeerId
 }
 
 func (r InformRequest) Pack() []byte {
@@ -132,7 +132,7 @@ func Unpack(buf []byte) Packet {
 			case 0x06:
 				var r InformRequest
 				r.Term = Term(binary.BigEndian.Uint32(buf[1:5]))
-				r.Leader = NodeId(buf[5])
+				r.Leader = PeerId(buf[5])
 				return r
 			}
 		}
