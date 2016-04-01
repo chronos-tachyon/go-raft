@@ -46,10 +46,10 @@ type Raft struct {
 	inLonelyState    bool
 	votedForId       uint32
 	currentLeaderId  uint32
-	currentTerm      uint64
-	lastLeaderTerm   uint64
 	electionTimer    uint32
 	heartbeatTimer   uint32
+	currentTerm      uint64
+	lastLeaderTerm   uint64
 	onGainLeadership func(*Raft)
 	onLoseLeadership func(*Raft)
 	onLonely         func(*Raft)
@@ -92,12 +92,14 @@ func New(storage Storage, sm StateMachine, id uint32, addr string) (*Raft, error
 	}, nil
 }
 
+// Solitary marks this Raft as willing to operate without any peers.
+// Rafts normally operate in clusters of 3 or 5.
 func (raft *Raft) Solitary(b bool) *Raft {
 	raft.isSolitary = b
 	return raft
 }
 
-// Start acquires the resources needed for this Raft.
+// Start launches this Raft.
 func (raft *Raft) Start() error {
 	if err := raft.restoreState(); err != nil {
 		return err
@@ -114,7 +116,7 @@ func (raft *Raft) Start() error {
 	return nil
 }
 
-// Stop releases the resources associated with this Raft.
+// Stop halts this Raft and releases resources.
 func (raft *Raft) Stop() error {
 	err := raft.conn.Close()
 	raft.wg.Wait()
@@ -122,22 +124,44 @@ func (raft *Raft) Stop() error {
 	return err
 }
 
-// Id returns the identifier for this node.
+// Id returns the identifier for this Raft.
 func (raft *Raft) Id() uint32 {
 	return raft.selfId
 }
 
+// Addr returns this Raft's UDP address.
 func (raft *Raft) Addr() *net.UDPAddr {
 	raft.mutex.Lock()
 	defer raft.mutex.Unlock()
-	return raft.addrLocked()
-}
-
-func (raft *Raft) addrLocked() *net.UDPAddr {
 	return raft.peers[raft.selfId].addr
 }
 
-// Quorum returns the number of peers required to form a quorum.
+// Peer returns the UDP address of the Raft with the given ID.
+func (raft *Raft) Peer(id uint32) *net.UDPAddr {
+	raft.mutex.Lock()
+	defer raft.mutex.Unlock()
+	addr, found := raft.peers[id]
+	if !found {
+		return nil
+	}
+	return addr
+}
+
+// PeerIds returns the IDs of all current peers.
+func (raft *Raft) PeerIds() []uint32 {
+	raft.mutex.Lock()
+	defer raft.mutex.Unlock()
+	list := make([]uint32, 0, len(raft.peers)-1)
+	for id := range raft.peers {
+		if id != raft.selfId {
+			list = append(list, id)
+		}
+	}
+	sort.Sort(byId(list))
+	return list
+}
+
+// Quorum returns the number of Rafts required to form a quorum.
 func (raft *Raft) Quorum() int {
 	raft.mutex.Lock()
 	defer raft.mutex.Unlock()
@@ -155,7 +179,8 @@ func (raft *Raft) quorumLocked() int {
 	return len(raft.peers)/2 + 1
 }
 
-// IsLeader returns true if this node is probably the leader.
+// IsLeader returns true if this Raft is *probably* the leader.
+// (The information may be stale.)
 func (raft *Raft) IsLeader() bool {
 	raft.mutex.Lock()
 	defer raft.mutex.Unlock()
@@ -323,12 +348,12 @@ func (raft *Raft) yeaVotesToString() string {
 }
 
 func (raft *Raft) idList() []uint32 {
-	idList := make([]uint32, 0, len(raft.peers))
+	list := make([]uint32, 0, len(raft.peers))
 	for id := range raft.peers {
-		idList = append(idList, id)
+		list = append(list, id)
 	}
-	sort.Sort(byId(idList))
-	return idList
+	sort.Sort(byId(list))
+	return list
 }
 
 func (raft *Raft) loop() {
