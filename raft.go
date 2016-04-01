@@ -22,8 +22,8 @@ const (
 type peerData struct {
 	addr       *net.UDPAddr
 	yeaVote    bool
-	nextIndex  Index
-	matchIndex Index
+	nextIndex  index
+	matchIndex index
 }
 
 // Raft represents a single participant in a Raft cluster.
@@ -41,8 +41,8 @@ type Raft struct {
 	inLonelyState    bool
 	votedFor         PeerId
 	currentLeader    PeerId
-	currentTerm      Term
-	lastLeaderTerm   Term
+	currentTerm      term
+	lastLeaderTerm   term
 	electionTimer    uint32
 	heartbeatTimer   uint32
 	onGainLeadership func(*Raft)
@@ -411,7 +411,7 @@ func (raft *Raft) sendAppendEntries() {
 				command: entry.command,
 			})
 		}
-		commitIndex := minIndex(raft.log.commitIndex, peerLatestIndex+Index(len(entries)))
+		commitIndex := minIndex(raft.log.commitIndex, peerLatestIndex+index(len(entries)))
 		raft.send(id, appendEntriesRequest{
 			term:         raft.currentTerm,
 			prevLogTerm:  peerLatestTerm,
@@ -509,7 +509,7 @@ func (raft *Raft) recvVoteResponse(from PeerId, pkt voteResponse) {
 func (raft *Raft) recvAppendEntriesRequest(from PeerId, pkt appendEntriesRequest) {
 	entries := pkt.entries
 	firstIndex := pkt.prevLogIndex + 1
-	lastCommittedIndex := minIndex(firstIndex+Index(len(entries)), raft.log.commitIndex)
+	lastCommittedIndex := minIndex(firstIndex+index(len(entries)), raft.log.commitIndex)
 
 	if pkt.term < raft.currentTerm {
 		goto Reject
@@ -538,7 +538,7 @@ func (raft *Raft) recvAppendEntriesRequest(from PeerId, pkt appendEntriesRequest
 		entries = entries[1:]
 	}
 	for i, entry := range entries {
-		index := firstIndex + Index(i)
+		index := firstIndex + index(i)
 		if index >= raft.log.startIndex {
 			if index < raft.log.nextIndex() && raft.log.term(index) != entry.term {
 				raft.log.deleteEntriesAfter(index - 1)
@@ -680,13 +680,13 @@ func (raft *Raft) Tick() {
 	}
 }
 
-func (raft *Raft) becomeFollower(term Term, voteFor PeerId, leader PeerId) {
+func (raft *Raft) becomeFollower(trm term, voteFor PeerId, leader PeerId) {
 	raft.state = follower
-	raft.currentTerm = term
+	raft.currentTerm = trm
 	raft.votedFor = voteFor
 	raft.currentLeader = leader
 	if leader != 0 {
-		raft.lastLeaderTerm = term
+		raft.lastLeaderTerm = trm
 	}
 	raft.electionTimer = raft.newElectionTimer()
 	raft.heartbeatTimer = 0 // unused
@@ -739,8 +739,8 @@ func (raft *Raft) newHeartbeatTimer() uint32 {
 	return 10 + uint32(raft.rand.Intn(5))
 }
 
-func (raft *Raft) matchConsensus() Index {
-	values := make([]Index, 0, len(raft.peers))
+func (raft *Raft) matchConsensus() index {
+	values := make([]index, 0, len(raft.peers))
 	values = append(values, raft.log.latestIndex())
 	for id, peer := range raft.peers {
 		if id != raft.self {
@@ -752,7 +752,7 @@ func (raft *Raft) matchConsensus() Index {
 	return values[i]
 }
 
-func (raft *Raft) commitTo(newCommitIndex Index) {
+func (raft *Raft) commitTo(newCommitIndex index) {
 	for raft.log.commitIndex < newCommitIndex {
 		raft.log.commitIndex++
 		entry := raft.log.at(raft.log.commitIndex)

@@ -25,7 +25,7 @@ func (x byId) Reverse() {
 	}
 }
 
-type byIndex []Index
+type byIndex []index
 
 func (x byIndex) Len() int           { return len(x) }
 func (x byIndex) Less(i, j int) bool { return x[i] < x[j] }
@@ -57,7 +57,7 @@ func equalUDPAddr(a, b *net.UDPAddr) bool {
 	return a.IP.Equal(b.IP) && a.Port == b.Port && a.Zone == b.Zone
 }
 
-func minIndex(list ...Index) Index {
+func minIndex(list ...index) index {
 	least := list[0]
 	for _, index := range list {
 		if index < least {

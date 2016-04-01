@@ -59,8 +59,8 @@ func TestAppendEntriesRequest(t *testing.T) {
 
 func TestAppendEntriesResponse(t *testing.T) {
 	before := appendEntriesResponse{
-		Term:    5,
-		Success: true,
+		term:    5,
+		success: true,
 	}
 	packed := before.pack()
 	after := unpack(packed).(appendEntriesResponse)
@@ -71,7 +71,7 @@ func TestAppendEntriesResponse(t *testing.T) {
 
 func TestNominateRequest(t *testing.T) {
 	before := nominateRequest{
-		Term: 5,
+		term: 5,
 	}
 	packed := before.pack()
 	after := unpack(packed).(nominateRequest)
@@ -82,8 +82,8 @@ func TestNominateRequest(t *testing.T) {
 
 func TestInformRequest(t *testing.T) {
 	before := informRequest{
-		Term:   5,
-		Leader: 23,
+		term:   5,
+		leader: 23,
 	}
 	packed := before.pack()
 	after := unpack(packed).(informRequest)
@@ -93,11 +93,11 @@ func TestInformRequest(t *testing.T) {
 }
 
 func equalAppendEntriesRequest(a, b appendEntriesRequest) bool {
-	return (a.Term == b.Term &&
-		a.PrevLogTerm == b.PrevLogTerm &&
-		a.PrevLogIndex == b.PrevLogIndex &&
-		a.LeaderCommit == b.LeaderCommit &&
-		equalEntries(a.Entries, b.Entries))
+	return (a.term == b.term &&
+		a.prevLogTerm == b.prevLogTerm &&
+		a.prevLogIndex == b.prevLogIndex &&
+		a.leaderCommit == b.leaderCommit &&
+		equalEntries(a.entries, b.entries))
 }
 
 func equalEntries(a, b []appendEntry) bool {
@@ -105,7 +105,7 @@ func equalEntries(a, b []appendEntry) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].Term != b[i].Term || !bytes.Equal(a[i].Command, b[i].Command) {
+		if a[i].term != b[i].term || !bytes.Equal(a[i].command, b[i].command) {
 			return false
 		}
 	}

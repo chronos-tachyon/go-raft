@@ -5,8 +5,8 @@ import (
 )
 
 type PeerId uint8
-type Term uint32
-type Index uint32
+type term uint32
+type index uint32
 
 type packet interface {
 	pack() []byte
@@ -14,13 +14,13 @@ type packet interface {
 
 type voteRequest struct {
 	// The currentTerm of the caller.
-	term Term
+	term term
 
 	// Term of the last entry in the caller's log.
-	latestTerm Term
+	latestTerm term
 
 	// Index of the last entry in the caller's log.
-	latestIndex Index
+	latestIndex index
 }
 
 func (pkt voteRequest) pack() []byte {
@@ -35,7 +35,7 @@ func (pkt voteRequest) pack() []byte {
 
 type voteResponse struct {
 	// The currentTerm of the callee.
-	term Term
+	term term
 
 	// true iff the follower/callee granted its vote to the candidate/caller.
 	granted bool
@@ -55,7 +55,7 @@ func (pkt voteResponse) pack() []byte {
 
 type appendEntry struct {
 	// Term in which the entry was proposed.
-	term Term
+	term term
 
 	// The state machine command to be committed.
 	command []byte
@@ -63,17 +63,17 @@ type appendEntry struct {
 
 type appendEntriesRequest struct {
 	// The currentTerm of the caller.
-	term Term
+	term term
 
 	// Term of the entry preceding Entries.
-	prevLogTerm Term
+	prevLogTerm term
 
 	// Index of the entry preceding Entries,
 	// or log.LatestIndex() if Entries is empty.
-	prevLogIndex Index
+	prevLogIndex index
 
 	// The log.CommitIndex of the leader.
-	leaderCommit Index
+	leaderCommit index
 
 	// The log entries to append.  May be empty.
 	entries []appendEntry
@@ -109,13 +109,13 @@ type appendEntriesResponse struct {
 	success bool
 
 	// The currentTerm of the callee.
-	term Term
+	term term
 
 	// The callee's resulting log.LatestIndex().
-	latestIndex Index
+	latestIndex index
 
 	// The callee's resulting log.CommitIndex.
-	commitIndex Index
+	commitIndex index
 }
 
 func (pkt appendEntriesResponse) pack() []byte {
@@ -131,7 +131,7 @@ func (pkt appendEntriesResponse) pack() []byte {
 
 type nominateRequest struct {
 	// The currentTerm of the caller.
-	term Term
+	term term
 }
 
 func (pkt nominateRequest) pack() []byte {
@@ -144,7 +144,7 @@ func (pkt nominateRequest) pack() []byte {
 
 type informRequest struct {
 	// The currentTerm of the caller.
-	term Term
+	term term
 
 	// The caller's current leader, i.e. the peer which sent an
 	// AppendEntriesRequest to the caller.
@@ -176,25 +176,25 @@ func unpack(buf []byte) packet {
 	switch {
 	case buf[0] == 0x01 && len(buf) == 16:
 		var pkt voteRequest
-		pkt.term = Term(binary.BigEndian.Uint32(buf[4:8]))
-		pkt.latestTerm = Term(binary.BigEndian.Uint32(buf[8:12]))
-		pkt.latestIndex = Index(binary.BigEndian.Uint32(buf[12:16]))
+		pkt.term = term(binary.BigEndian.Uint32(buf[4:8]))
+		pkt.latestTerm = term(binary.BigEndian.Uint32(buf[8:12]))
+		pkt.latestIndex = index(binary.BigEndian.Uint32(buf[12:16]))
 		return pkt
 
 	case buf[0] == 0x02 && len(buf) == 8:
 		var pkt voteResponse
 		pkt.granted = (buf[1] != 0)
 		pkt.logIsOK = (buf[2] != 0)
-		pkt.term = Term(binary.BigEndian.Uint32(buf[4:8]))
+		pkt.term = term(binary.BigEndian.Uint32(buf[4:8]))
 		return pkt
 
 	case buf[0] == 0x03 && len(buf) >= 20:
 		var pkt appendEntriesRequest
 		count := int(binary.BigEndian.Uint16(buf[2:4]))
-		pkt.term = Term(binary.BigEndian.Uint32(buf[4:8]))
-		pkt.prevLogTerm = Term(binary.BigEndian.Uint32(buf[8:12]))
-		pkt.prevLogIndex = Index(binary.BigEndian.Uint32(buf[12:16]))
-		pkt.leaderCommit = Index(binary.BigEndian.Uint32(buf[16:20]))
+		pkt.term = term(binary.BigEndian.Uint32(buf[4:8]))
+		pkt.prevLogTerm = term(binary.BigEndian.Uint32(buf[8:12]))
+		pkt.prevLogIndex = index(binary.BigEndian.Uint32(buf[12:16]))
+		pkt.leaderCommit = index(binary.BigEndian.Uint32(buf[16:20]))
 		if count > 0 {
 			pkt.entries = make([]appendEntry, count)
 			n = 20
@@ -202,7 +202,7 @@ func unpack(buf []byte) packet {
 				if n+5 > len(buf) {
 					return nil
 				}
-				term := Term(binary.BigEndian.Uint32(buf[n : n+4]))
+				term := term(binary.BigEndian.Uint32(buf[n : n+4]))
 				length := int(buf[n+4])
 				n += 5
 				if n+length > len(buf) {
@@ -222,20 +222,20 @@ func unpack(buf []byte) packet {
 	case buf[0] == 0x04 && len(buf) == 16:
 		var pkt appendEntriesResponse
 		pkt.success = (buf[1] != 0)
-		pkt.term = Term(binary.BigEndian.Uint32(buf[4:8]))
-		pkt.latestIndex = Index(binary.BigEndian.Uint32(buf[8:12]))
-		pkt.commitIndex = Index(binary.BigEndian.Uint32(buf[12:16]))
+		pkt.term = term(binary.BigEndian.Uint32(buf[4:8]))
+		pkt.latestIndex = index(binary.BigEndian.Uint32(buf[8:12]))
+		pkt.commitIndex = index(binary.BigEndian.Uint32(buf[12:16]))
 		return pkt
 
 	case buf[0] == 0x05 && len(buf) == 8:
 		var pkt nominateRequest
-		pkt.term = Term(binary.BigEndian.Uint32(buf[4:8]))
+		pkt.term = term(binary.BigEndian.Uint32(buf[4:8]))
 		return pkt
 
 	case buf[0] == 0x06 && len(buf) == 8:
 		var pkt informRequest
 		pkt.leader = PeerId(buf[1])
-		pkt.term = Term(binary.BigEndian.Uint32(buf[4:8]))
+		pkt.term = term(binary.BigEndian.Uint32(buf[4:8]))
 		return pkt
 	}
 	return nil
