@@ -29,14 +29,15 @@ type peerData struct {
 // Raft represents a single participant in a Raft cluster.
 type Raft struct {
 	self             PeerId
-	conn             *net.UDPConn
 	rand             *rand.Rand
-	sm               StateMachine
+	conn             *net.UDPConn
 	wg               sync.WaitGroup
 	mutex            sync.Mutex
 	peers            map[PeerId]*peerData
+	sm               StateMachine
 	log              *raftLog
 	state            state
+	inBootstrapMode  bool
 	inLonelyState    bool
 	votedFor         PeerId
 	currentLeader    PeerId
@@ -68,20 +69,21 @@ type Raft struct {
  */
 
 // New constructs a new Raft.
-func New(sm StateMachine, cfg *Config, self PeerId) (*Raft, error) {
-	peers, err := processConfig(cfg)
+func New(sm StateMachine, id PeerId, addr string, bootstrapMode bool) (*Raft, error) {
+	if id == 0 {
+		return nil, fmt.Errorf("invalid id: 0")
+	}
+	udpaddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err
 	}
-	if _, found := peers[self]; !found {
-		return nil, fmt.Errorf("missing self id %d", self)
-	}
 	return &Raft{
-		self:  self,
-		rand:  rand.New(rand.NewSource(0xdeadbeef ^ int64(self))),
-		sm:    sm,
-		peers: peers,
-		log:   newLog(),
+		self:            id,
+		rand:            rand.New(rand.NewSource(0xdeadbeef ^ int64(id))),
+		peers:           map[PeerId]*peerData{id: &peerData{addr: udpaddr}},
+		sm:              sm,
+		log:             newLog(),
+		inBootstrapMode: bootstrapMode,
 	}, nil
 }
 
@@ -103,12 +105,23 @@ func (raft *Raft) Start() error {
 func (raft *Raft) Stop() error {
 	err := raft.conn.Close()
 	raft.wg.Wait()
+	raft.conn = nil
 	return err
 }
 
 // Id returns the identifier for this node.
 func (raft *Raft) Id() PeerId {
 	return raft.self
+}
+
+func (raft *Raft) Addr() *net.UDPAddr {
+	raft.mutex.Lock()
+	defer raft.mutex.Unlock()
+	return raft.addrLocked()
+}
+
+func (raft *Raft) addrLocked() *net.UDPAddr {
+	return raft.peers[raft.self].addr
 }
 
 // Quorum returns the number of peers required to form a quorum.
@@ -119,6 +132,13 @@ func (raft *Raft) Quorum() int {
 }
 
 func (raft *Raft) quorumLocked() int {
+	assert(len(raft.peers) > 0, "raft.peers is empty")
+	if len(raft.peers) == 1 {
+		if raft.inBootstrapMode {
+			return 1
+		}
+		return 2
+	}
 	return len(raft.peers)/2 + 1
 }
 
@@ -126,6 +146,41 @@ func (raft *Raft) IsLeader() bool {
 	raft.mutex.Lock()
 	defer raft.mutex.Unlock()
 	return raft.state == leader
+}
+
+func (raft *Raft) AddPeer(id PeerId, addr string) error {
+	if id == 0 {
+		return fmt.Errorf("invalid id: 0")
+	}
+	if id == raft.self {
+		return fmt.Errorf("duplicate id: %d", id)
+	}
+	udpaddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return err
+	}
+	raft.mutex.Lock()
+	defer raft.mutex.Unlock()
+	if _, found := raft.peers[id]; found {
+		return fmt.Errorf("duplicate id: %d", id)
+	}
+	peer := &peerData{addr: udpaddr}
+	if raft.state == leader {
+		peer.nextIndex = raft.log.nextIndex()
+	}
+	raft.peers[id] = peer
+	raft.inBootstrapMode = false
+	return nil
+}
+
+func (raft *Raft) RemovePeer(id PeerId) error {
+	raft.mutex.Lock()
+	defer raft.mutex.Unlock()
+	if _, found := raft.peers[id]; !found {
+		return fmt.Errorf("no such id: %d", id)
+	}
+	delete(raft.peers, id)
+	return nil
 }
 
 // OnGainLeadership sets the callback which, if non-nil, will be executed when
@@ -708,26 +763,4 @@ func (raft *Raft) commitTo(newCommitIndex Index) {
 			entry.callback(true)
 		}
 	}
-}
-
-func processConfig(cfg *Config) (map[PeerId]*peerData, error) {
-	if len(cfg.Peers) == 0 {
-		return nil, fmt.Errorf("must configure at least one Raft node")
-	}
-	result := make(map[PeerId]*peerData, len(cfg.Peers))
-	for _, item := range cfg.Peers {
-		id := PeerId(item.Id)
-		if id == 0 {
-			return nil, fmt.Errorf("invalid id: 0")
-		}
-		if _, found := result[id]; found {
-			return nil, fmt.Errorf("duplicate id: %d", id)
-		}
-		addr, err := net.ResolveUDPAddr("udp", item.Addr)
-		if err != nil {
-			return nil, err
-		}
-		result[id] = &peerData{addr: addr}
-	}
-	return result, nil
 }

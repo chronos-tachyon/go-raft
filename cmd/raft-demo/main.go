@@ -28,21 +28,6 @@ func NotLonely(peer *raft.Raft) {
 	fmt.Printf("WE'RE BACK! <%d>\n", peer.Id())
 }
 
-const configuration = `
----
-peers:
-  - id: 1
-    addr: localhost:9001
-  - id: 2
-    addr: localhost:9002
-  - id: 3
-    addr: localhost:9003
-  - id: 4
-    addr: localhost:9004
-  - id: 5
-    addr: localhost:9005
-`
-
 type stateMachine struct {
 	x, y uint8
 }
@@ -91,26 +76,43 @@ func showRafts(rafts []*raft.Raft) {
 	fmt.Println()
 }
 
+type configItem struct {
+	id raft.PeerId
+	addr string
+}
+
+var configuration = []configItem{
+	{1, "localhost:9001"},
+	{2, "localhost:9002"},
+	{3, "localhost:9003"},
+	{4, "localhost:9004"},
+	{5, "localhost:9005"},
+}
+
 func main() {
-	cfg, err := raft.ParseConfig([]byte(configuration))
-	if err != nil {
-		log.Fatalf("fatal: %v", err)
-	}
-	peers := make([]*raft.Raft, 0, len(cfg.Peers))
-	for _, item := range cfg.Peers {
-		peer, err := raft.New(&stateMachine{}, cfg, item.Id)
-		if err != nil {
-			log.Fatalf("fatal: %v", err)
-		}
-		peer.OnGainLeadership(GainLeadership)
-		peer.OnLoseLeadership(LoseLeadership)
-		peer.OnLonely(Lonely)
-		peer.OnNotLonely(NotLonely)
-		err = peer.Start()
+	peers := make([]*raft.Raft, 0, len(configuration))
+	for _, item := range configuration {
+		peer, err := raft.New(&stateMachine{}, item.id, item.addr, false)
 		if err != nil {
 			log.Fatalf("fatal: %v", err)
 		}
 		peers = append(peers, peer)
+	}
+	for _, p := range peers {
+		for _, q := range peers {
+			if p != q {
+				p.AddPeer(q.Id(), q.Addr().String())
+			}
+		}
+	}
+	for _, peer := range peers {
+		peer.OnGainLeadership(GainLeadership)
+		peer.OnLoseLeadership(LoseLeadership)
+		peer.OnLonely(Lonely)
+		peer.OnNotLonely(NotLonely)
+		if err := peer.Start(); err != nil {
+			log.Fatalf("fatal: %v", err)
+		}
 	}
 
 	var signaled uint32
@@ -139,17 +141,17 @@ func main() {
 		case 45:
 			leader(peers).Append([]byte{'x', 1}, func(ok bool) {
 				if ok {
-					fmt.Println("--- COMMITTED x=1 ---")
+					fmt.Println("--- COMMITTED x+=1 ---")
 				} else {
-					fmt.Println("--- REJECTED x=1 ---")
+					fmt.Println("--- REJECTED x+=1 ---")
 				}
 			})
 		case 142:
 			leader(peers).Append([]byte{'y', 2}, func(ok bool) {
 				if ok {
-					fmt.Println("--- COMMITTED y=2 ---")
+					fmt.Println("--- COMMITTED y+=2 ---")
 				} else {
-					fmt.Println("--- REJECTED y=2 ---")
+					fmt.Println("--- REJECTED y+=2 ---")
 				}
 			})
 		case 165:
@@ -166,6 +168,14 @@ func main() {
 					5: 2,
 				}
 				return group[i] != group[j]
+			})
+		case 315:
+			leader(peers).Append([]byte{'x', 2}, func(ok bool) {
+				if ok {
+					fmt.Println("--- COMMITTED x+=2 ---")
+				} else {
+					fmt.Println("--- REJECTED x+=2 ---")
+				}
 			})
 		case 500:
 			fmt.Println("--- HEAL! 2 ---")
