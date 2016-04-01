@@ -4,119 +4,119 @@ import (
 	"fmt"
 )
 
-type LogEntry struct {
-	Index    Index
-	Term     Term
-	Command  []byte
-	Callback func(bool)
+type raftEntry struct {
+	index    Index
+	term     Term
+	command  []byte
+	callback func(bool)
 }
 
-type Log struct {
+type raftLog struct {
 	// The Term of the hypothetical entry before Entries.
-	StartTerm Term
+	startTerm Term
 
 	// The index of the first entry in Entries.
-	StartIndex Index
+	startIndex Index
 
 	// The index of the most recently committed entry.
-	CommitIndex Index
+	commitIndex Index
 
 	// The unsnapshotted entries.
-	Entries []LogEntry
+	entries []raftEntry
 }
 
-func NewLog() *Log {
-	return &Log{StartIndex: 1}
+func newLog() *raftLog {
+	return &raftLog{startIndex: 1}
 }
 
-func (log *Log) NextIndex() Index {
+func (log *raftLog) checkInvariants() {
+	assert(log.startIndex != 0, "log not initialized")
+	end := log.startIndex + Index(len(log.entries))
+	assert(log.commitIndex < end, "commit %d ahead of end %d", log.commitIndex, end)
+	for i, entry := range log.entries {
+		index := log.startIndex + Index(i)
+		assert(entry.index == index, "index mismatch: expected %d got %d", index, entry.index)
+	}
+}
+
+func (log *raftLog) nextIndex() Index {
 	log.checkInvariants()
-	p := log.StartIndex + Index(len(log.Entries))
-	if len(log.Entries) > 0 {
-		q := log.Entries[len(log.Entries)-1].Index + 1
+	p := log.startIndex + Index(len(log.entries))
+	if len(log.entries) > 0 {
+		q := log.entries[len(log.entries)-1].index + 1
 		assert(p == q, "index mismatch: expected %d got %d", p, q)
 	}
 	return p
 }
 
-func (log *Log) LatestIndex() Index {
-	return log.NextIndex() - 1
+func (log *raftLog) latestIndex() Index {
+	return log.nextIndex() - 1
 }
 
-func (log *Log) At(index Index) LogEntry {
+func (log *raftLog) at(index Index) raftEntry {
 	log.checkInvariants()
-	lo := log.StartIndex
-	hi := lo + Index(len(log.Entries))
+	lo := log.startIndex
+	hi := lo + Index(len(log.entries))
 	assert(index >= lo, "index=%d outside of [%d,%d)", lo, hi)
 	assert(index < hi, "index=%d outside of [%d,%d)", index, lo, hi)
-	entry := log.Entries[index-log.StartIndex]
-	assert(entry.Index == index, "index mismatch: expected %d got %d", index, entry.Index)
+	entry := log.entries[index-log.startIndex]
+	assert(entry.index == index, "index mismatch: expected %d got %d", index, entry.index)
 	return entry
 }
 
-func (log *Log) Term(index Index) Term {
+func (log *raftLog) term(index Index) Term {
 	log.checkInvariants()
-	lo := log.StartIndex
-	hi := lo + Index(len(log.Entries))
+	lo := log.startIndex
+	hi := lo + Index(len(log.entries))
 	if index < lo {
-		return log.StartTerm
+		return log.startTerm
 	}
 	assert(index < hi, "index=%d outside of [%d,%d)", index, lo, hi)
-	entry := log.Entries[index-log.StartIndex]
-	assert(entry.Index == index, "index mismatch: expected %d got %d", index, entry.Index)
-	return entry.Term
+	entry := log.entries[index-log.startIndex]
+	assert(entry.index == index, "index mismatch: expected %d got %d", index, entry.index)
+	return entry.term
 }
 
-// DeleteEntriesBefore removes all entries from StartIndex to one before index.
-func (log *Log) DeleteEntriesBefore(index Index) {
+// deleteEntriesBefore removes all entries from StartIndex to one before index.
+func (log *raftLog) deleteEntriesBefore(index Index) {
 	log.checkInvariants()
-	if index > log.StartIndex {
-		n := log.StartIndex + Index(len(log.Entries)) - index
-		entries := make([]LogEntry, n)
-		copy(entries, log.Entries[index:index+n])
-		log.Entries = entries
-		log.StartIndex = index
+	if index > log.startIndex {
+		n := log.startIndex + Index(len(log.entries)) - index
+		entries := make([]raftEntry, n)
+		copy(entries, log.entries[index:index+n])
+		log.entries = entries
+		log.startIndex = index
 	}
 	log.checkInvariants()
 }
 
-// DeleteEntriesAfter removes all entries that come after index.
-func (log *Log) DeleteEntriesAfter(index Index) {
+// deleteEntriesAfter removes all entries that come after index.
+func (log *raftLog) deleteEntriesAfter(index Index) {
 	log.checkInvariants()
-	if index < log.StartIndex {
-		log.Entries = nil
+	if index < log.startIndex {
+		log.entries = nil
 		return
 	}
-	if index < log.LatestIndex() {
-		log.Entries = log.Entries[0 : index-log.StartIndex+1]
+	if index < log.latestIndex() {
+		log.entries = log.entries[0 : index-log.startIndex+1]
 	}
 	log.checkInvariants()
 }
 
-func (log *Log) Append(term Term, command []byte, callback func(bool)) {
+func (log *raftLog) appendEntry(term Term, command []byte, callback func(bool)) {
 	log.checkInvariants()
-	index := log.NextIndex()
-	log.Entries = append(log.Entries, LogEntry{index, term, command, callback})
+	index := log.nextIndex()
+	log.entries = append(log.entries, raftEntry{index, term, command, callback})
 	log.checkInvariants()
 }
 
-func (log *Log) String() string {
+func (log *raftLog) String() string {
 	var entries string
-	for _, entry := range log.Entries {
-		entries += fmt.Sprintf("%d,", entry.Term)
+	for _, entry := range log.entries {
+		entries += fmt.Sprintf("%d,", entry.term)
 	}
 	if len(entries) > 0 {
 		entries = entries[0 : len(entries)-1]
 	}
-	return fmt.Sprintf("%d %d %d [%s]", log.StartTerm, log.StartIndex, log.CommitIndex, entries)
-}
-
-func (log *Log) checkInvariants() {
-	assert(log.StartIndex != 0, "log not initialized")
-	end := log.StartIndex + Index(len(log.Entries))
-	assert(log.CommitIndex < end, "commit %d ahead of end %d", log.CommitIndex, end)
-	for i, entry := range log.Entries {
-		index := log.StartIndex + Index(i)
-		assert(entry.Index == index, "index mismatch: expected %d got %d", index, entry.Index)
-	}
+	return fmt.Sprintf("%d %d %d [%s]", log.startTerm, log.startIndex, log.commitIndex, entries)
 }

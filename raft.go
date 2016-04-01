@@ -35,7 +35,7 @@ type Raft struct {
 	wg               sync.WaitGroup
 	mutex            sync.Mutex
 	peers            map[PeerId]*peerData
-	log              *Log
+	log              *raftLog
 	state            state
 	inLonelyState    bool
 	votedFor         PeerId
@@ -81,7 +81,7 @@ func New(sm StateMachine, cfg *Config, self PeerId) (*Raft, error) {
 		rand:  rand.New(rand.NewSource(0xdeadbeef ^ int64(self))),
 		sm:    sm,
 		peers: peers,
-		log:   NewLog(),
+		log:   newLog(),
 	}, nil
 }
 
@@ -185,7 +185,7 @@ func (raft *Raft) Append(cmd []byte, cb func(ok bool)) {
 	assert(len(cmd) < 256, "command too long")
 	raft.mutex.Lock()
 	if raft.state == leader {
-		raft.log.Append(raft.currentTerm, cmd, cb)
+		raft.log.appendEntry(raft.currentTerm, cmd, cb)
 	} else {
 		if cb != nil {
 			cb(false)
@@ -323,8 +323,8 @@ func (raft *Raft) send(to PeerId, p packet) {
 }
 
 func (raft *Raft) sendVoteRequests() {
-	latestIndex := raft.log.LatestIndex()
-	latestTerm := raft.log.Term(latestIndex)
+	latestIndex := raft.log.latestIndex()
+	latestTerm := raft.log.term(latestIndex)
 	for id, peer := range raft.peers {
 		if !peer.yeaVote {
 			raft.send(id, voteRequest{
@@ -342,21 +342,21 @@ func (raft *Raft) sendAppendEntries() {
 			continue
 		}
 		peer := raft.peers[id]
-		latestIndex := raft.log.LatestIndex()
+		latestIndex := raft.log.latestIndex()
 		peerLatestIndex := peer.nextIndex - 1
-		peerLatestTerm := raft.log.Term(peerLatestIndex)
+		peerLatestTerm := raft.log.term(peerLatestIndex)
 		assert(peerLatestIndex <= latestIndex, "peerLatestIndex=%d > latestIndex=%d", peerLatestIndex, latestIndex)
 		n := minIndex(latestIndex, peerLatestIndex+8)
 		numEntries := n - peerLatestIndex
 		entries := make([]appendEntry, 0, numEntries)
 		for index := peerLatestIndex + 1; index <= n; index++ {
-			entry := raft.log.At(index)
+			entry := raft.log.at(index)
 			entries = append(entries, appendEntry{
-				Term:    entry.Term,
-				Command: entry.Command,
+				Term:    entry.term,
+				Command: entry.command,
 			})
 		}
-		commitIndex := minIndex(raft.log.CommitIndex, peerLatestIndex+Index(len(entries)))
+		commitIndex := minIndex(raft.log.commitIndex, peerLatestIndex+Index(len(entries)))
 		raft.send(id, appendEntriesRequest{
 			Term:         raft.currentTerm,
 			PrevLogTerm:  peerLatestTerm,
@@ -410,8 +410,8 @@ func (raft *Raft) recv(from PeerId, pkt packet) {
 }
 
 func (raft *Raft) recvVoteRequest(from PeerId, pkt voteRequest) {
-	latestIndex := raft.log.LatestIndex()
-	latestTerm := raft.log.Term(latestIndex)
+	latestIndex := raft.log.latestIndex()
+	latestTerm := raft.log.term(latestIndex)
 	logIsOK := (pkt.LatestTerm > latestTerm || (pkt.LatestTerm == latestTerm && pkt.LatestIndex >= latestIndex))
 	alreadyVoted := (pkt.Term == raft.currentTerm && raft.votedFor != 0 && raft.votedFor != from)
 	if pkt.Term > raft.currentTerm {
@@ -454,7 +454,7 @@ func (raft *Raft) recvVoteResponse(from PeerId, pkt voteResponse) {
 func (raft *Raft) recvAppendEntriesRequest(from PeerId, pkt appendEntriesRequest) {
 	entries := pkt.Entries
 	firstIndex := pkt.PrevLogIndex + 1
-	lastCommittedIndex := minIndex(firstIndex+Index(len(entries)), raft.log.CommitIndex)
+	lastCommittedIndex := minIndex(firstIndex+Index(len(entries)), raft.log.commitIndex)
 
 	if pkt.Term < raft.currentTerm {
 		goto Reject
@@ -466,38 +466,38 @@ func (raft *Raft) recvAppendEntriesRequest(from PeerId, pkt appendEntriesRequest
 
 	raft.becomeFollower(pkt.Term, from, from)
 	raft.log.checkInvariants()
-	if pkt.PrevLogIndex >= raft.log.NextIndex() {
+	if pkt.PrevLogIndex >= raft.log.nextIndex() {
 		goto Reject
 	}
-	if raft.log.Term(pkt.PrevLogIndex) != pkt.PrevLogTerm {
+	if raft.log.term(pkt.PrevLogIndex) != pkt.PrevLogTerm {
 		goto Reject
 	}
 	for firstIndex < lastCommittedIndex {
-		if firstIndex >= raft.log.StartIndex && firstIndex < raft.log.NextIndex() {
-			if raft.log.Term(pkt.PrevLogIndex) != entries[0].Term {
+		if firstIndex >= raft.log.startIndex && firstIndex < raft.log.nextIndex() {
+			if raft.log.term(pkt.PrevLogIndex) != entries[0].Term {
 				goto Reject
 			}
-			assert(bytes.Equal(raft.log.At(pkt.PrevLogIndex).Command, entries[0].Command), "")
+			assert(bytes.Equal(raft.log.at(pkt.PrevLogIndex).command, entries[0].Command), "")
 		}
 		firstIndex++
 		entries = entries[1:]
 	}
 	for i, entry := range entries {
 		index := firstIndex + Index(i)
-		if index >= raft.log.StartIndex {
-			if index < raft.log.NextIndex() && raft.log.Term(index) != entry.Term {
-				raft.log.DeleteEntriesAfter(index - 1)
-				assert(raft.log.NextIndex() == index, "new item index mismatch: expected %d got %d", raft.log.NextIndex(), index)
+		if index >= raft.log.startIndex {
+			if index < raft.log.nextIndex() && raft.log.term(index) != entry.Term {
+				raft.log.deleteEntriesAfter(index - 1)
+				assert(raft.log.nextIndex() == index, "new item index mismatch: expected %d got %d", raft.log.nextIndex(), index)
 			}
-			raft.log.Append(entry.Term, entry.Command, nil)
+			raft.log.appendEntry(entry.Term, entry.Command, nil)
 		}
 	}
 	raft.commitTo(pkt.LeaderCommit)
 	raft.send(from, appendEntriesResponse{
 		Success:     true,
 		Term:        raft.currentTerm,
-		LatestIndex: raft.log.LatestIndex(),
-		CommitIndex: raft.log.CommitIndex,
+		LatestIndex: raft.log.latestIndex(),
+		CommitIndex: raft.log.commitIndex,
 	})
 	for _, id := range raft.idList() {
 		if id != raft.self && id != from {
@@ -513,8 +513,8 @@ Reject:
 	raft.send(from, appendEntriesResponse{
 		Success:     false,
 		Term:        raft.currentTerm,
-		LatestIndex: raft.log.LatestIndex(),
-		CommitIndex: raft.log.CommitIndex,
+		LatestIndex: raft.log.latestIndex(),
+		CommitIndex: raft.log.commitIndex,
 	})
 }
 
@@ -537,7 +537,7 @@ func (raft *Raft) recvAppendEntriesResponse(from PeerId, pkt appendEntriesRespon
 		assert(peer.matchIndex <= prevLogIndex+numEntries, "%#v matchIndex went backward: old=%d new=%d+%d", from, peer.matchIndex, prevLogIndex, numEntries)
 		peer.matchIndex = prevLogIndex + numEntries
 		newCommitIndex := raft.matchConsensus()
-		if raft.log.Term(newCommitIndex) == raft.currentTerm {
+		if raft.log.term(newCommitIndex) == raft.currentTerm {
 			raft.commitTo(newCommitIndex)
 		}
 		peer.nextIndex = peer.matchIndex + 1
@@ -669,10 +669,10 @@ func (raft *Raft) becomeLeader() {
 	raft.heartbeatTimer = raft.newHeartbeatTimer()
 	for id, peer := range raft.peers {
 		peer.yeaVote = (id == raft.self)
-		peer.nextIndex = raft.log.NextIndex()
+		peer.nextIndex = raft.log.nextIndex()
 		peer.matchIndex = 0
 	}
-	raft.log.Append(raft.currentTerm, nil, nil)
+	raft.log.appendEntry(raft.currentTerm, nil, nil)
 	raft.sendAppendEntries()
 }
 
@@ -686,7 +686,7 @@ func (raft *Raft) newHeartbeatTimer() uint32 {
 
 func (raft *Raft) matchConsensus() Index {
 	values := make([]Index, 0, len(raft.peers))
-	values = append(values, raft.log.LatestIndex())
+	values = append(values, raft.log.latestIndex())
 	for id, peer := range raft.peers {
 		if id != raft.self {
 			values = append(values, peer.matchIndex)
@@ -698,14 +698,14 @@ func (raft *Raft) matchConsensus() Index {
 }
 
 func (raft *Raft) commitTo(newCommitIndex Index) {
-	for raft.log.CommitIndex < newCommitIndex {
-		raft.log.CommitIndex++
-		entry := raft.log.At(raft.log.CommitIndex)
-		if len(entry.Command) > 0 {
-			raft.sm.Commit(entry.Command)
+	for raft.log.commitIndex < newCommitIndex {
+		raft.log.commitIndex++
+		entry := raft.log.at(raft.log.commitIndex)
+		if len(entry.command) > 0 {
+			raft.sm.Commit(entry.command)
 		}
-		if entry.Callback != nil {
-			entry.Callback(true)
+		if entry.callback != nil {
+			entry.callback(true)
 		}
 	}
 }
