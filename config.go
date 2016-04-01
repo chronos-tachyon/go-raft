@@ -9,7 +9,7 @@ type Config struct {
 }
 
 type PeerConfig struct {
-	Id   uint8
+	Id   PeerId
 	Addr string
 }
 

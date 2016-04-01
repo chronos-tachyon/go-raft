@@ -9,8 +9,6 @@ import (
 	"net"
 	"sort"
 	"sync"
-
-	"github.com/chronos-tachyon/go-raft/packet"
 )
 
 type state uint8
@@ -21,23 +19,31 @@ const (
 	leader
 )
 
-// Raft represents a single participant in a Raft network.
+type peerData struct {
+	addr       *net.UDPAddr
+	yeaVote    bool
+	nextIndex  Index
+	matchIndex Index
+}
+
+// Raft represents a single participant in a Raft cluster.
 type Raft struct {
+	self             PeerId
 	conn             *net.UDPConn
-	self             packet.PeerId
+	rand             *rand.Rand
+	sm               StateMachine
 	wg               sync.WaitGroup
 	mutex            sync.Mutex
-	peers            map[packet.PeerId]*net.UDPAddr
+	peers            map[PeerId]*peerData
+	log              *Log
 	state            state
-	votedFor         packet.PeerId
-	currentLeader    packet.PeerId
-	currentTerm      packet.Term
-	lastLeaderTerm   packet.Term
-	time0            uint32
-	time1            uint32
-	currentNonce     uint32
-	yeaVotes         map[packet.PeerId]struct{}
 	inLonelyState    bool
+	votedFor         PeerId
+	currentLeader    PeerId
+	currentTerm      Term
+	lastLeaderTerm   Term
+	electionTimer    uint32
+	heartbeatTimer   uint32
 	onGainLeadership func(*Raft)
 	onLoseLeadership func(*Raft)
 	onLonely         func(*Raft)
@@ -46,46 +52,48 @@ type Raft struct {
 
 /*
  * follower:
- *	time0		ticks until become candidate
- *	time1		unused (0)
- *	currentNonce	unused (0)
+ *	electionTimer	ticks until become candidate
+ *	heartbeatTimer	unused (0)
  *	yeaVotes	unused (nil)
  *
  * candidate:
- *	time0		ticks until bump currentTerm and try again
- *	time1		ticks until retransmit VoteRequests
- *	currentNonce	unused (0)
+ *	electionTimer	ticks until bump currentTerm and try again
+ *	heartbeatTimer	ticks until retransmit VoteRequests
  *	yeaVotes	set of yea votes to become leader
  *
  * leader:
- *	time0		ticks until drop leadership
- *	time1		ticks until heartbeat sent
- *	currentNonce	heartbeat nonce
+ *	electionTimer	unused (temporarily; will be: ticks until drop leadership)
+ *	heartbeatTimer	ticks until heartbeat sent
  *	yeaVotes	set of yea votes to retain leadership
  */
 
 // New constructs a new Raft.
-func New(cfg *Config, self uint8) (*Raft, error) {
-	selfid := packet.PeerId(self)
-	peermap, err := processConfig(cfg)
+func New(sm StateMachine, cfg *Config, self PeerId) (*Raft, error) {
+	peers, err := processConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	if _, found := peermap[selfid]; !found {
-		return nil, fmt.Errorf("missing self id %d", selfid)
+	if _, found := peers[self]; !found {
+		return nil, fmt.Errorf("missing self id %d", self)
 	}
-	return &Raft{self: selfid, peers: peermap}, nil
+	return &Raft{
+		self:  self,
+		rand:  rand.New(rand.NewSource(0xdeadbeef ^ int64(self))),
+		sm:    sm,
+		peers: peers,
+		log:   NewLog(),
+	}, nil
 }
 
 // Start acquires the resources needed for this Raft.
 func (raft *Raft) Start() error {
-	conn, err := net.ListenUDP("udp", raft.peers[raft.self])
+	conn, err := net.ListenUDP("udp", raft.peers[raft.self].addr)
 	if err != nil {
 		return err
 	}
 	raft.conn = conn
 	raft.state = follower
-	raft.time0 = 5 + uint32(rand.Intn(10))
+	raft.electionTimer = 2 * raft.newHeartbeatTimer()
 	raft.wg.Add(1)
 	go raft.loop()
 	return nil
@@ -98,47 +106,26 @@ func (raft *Raft) Stop() error {
 	return err
 }
 
-func (raft *Raft) AddPeer(peerId uint8, peerAddr string) error {
-	id := packet.PeerId(peerId)
-	addr, err := net.ResolveUDPAddr("udp", peerAddr)
-	if err != nil {
-		return err
-	}
-	raft.mutex.Lock()
-	defer raft.mutex.Unlock()
-	if id == 0 {
-		return fmt.Errorf("invalid id: 0")
-	}
-	if _, found := raft.peers[id]; found {
-		return fmt.Errorf("duplicate id: %d", id)
-	}
-	raft.peers[id] = addr
-	return nil
-}
-
-func (raft *Raft) RemovePeer(peerId uint8) error {
-	id := packet.PeerId(peerId)
-	if id == raft.self {
-		return fmt.Errorf("cannot remove self id: %d", id)
-	}
-	raft.mutex.Lock()
-	defer raft.mutex.Unlock()
-	if _, found := raft.peers[id]; !found {
-		return fmt.Errorf("no such id: %d", id)
-	}
-	delete(raft.peers, id)
-	delete(raft.yeaVotes, id)
-	return nil
-}
-
 // Id returns the identifier for this node.
-func (raft *Raft) Id() packet.PeerId {
+func (raft *Raft) Id() PeerId {
 	return raft.self
 }
 
 // Quorum returns the number of peers required to form a quorum.
 func (raft *Raft) Quorum() int {
+	raft.mutex.Lock()
+	defer raft.mutex.Unlock()
+	return raft.quorumLocked()
+}
+
+func (raft *Raft) quorumLocked() int {
 	return len(raft.peers)/2 + 1
+}
+
+func (raft *Raft) IsLeader() bool {
+	raft.mutex.Lock()
+	defer raft.mutex.Unlock()
+	return raft.state == leader
 }
 
 // OnGainLeadership sets the callback which, if non-nil, will be executed when
@@ -180,22 +167,51 @@ func (raft *Raft) ForceElection() {
 }
 
 // Nominate proposes that the identified node ought to become the leader.
-func (raft *Raft) Nominate(id packet.PeerId) {
+func (raft *Raft) Nominate(id PeerId) {
 	raft.mutex.Lock()
 	if id == raft.self {
 		if raft.state != leader {
 			raft.becomeCandidate()
 		}
-		return
+	} else {
+		raft.send(id, NominateRequest{
+			Term: raft.currentTerm,
+		})
 	}
-	raft.send(id, packet.NominateRequest{raft.currentTerm})
 	raft.mutex.Unlock()
+}
+
+func (raft *Raft) Append(cmd []byte, cb func(ok bool)) {
+	assert(len(cmd) < 256, "command too long")
+	raft.mutex.Lock()
+	if raft.state == leader {
+		raft.log.Append(raft.currentTerm, cmd, cb)
+	} else {
+		if cb != nil {
+			cb(false)
+		}
+	}
+	raft.mutex.Unlock()
+}
+
+func (raft *Raft) yeaVotes() int {
+	result := 0
+	for _, peer := range raft.peers {
+		if peer.yeaVote {
+			result++
+		}
+	}
+	return result
 }
 
 // String returns a condensed but human-readable summary of this node's state.
 func (raft *Raft) String() string {
 	raft.mutex.Lock()
 	defer raft.mutex.Unlock()
+	return raft.stringLocked()
+}
+
+func (raft *Raft) stringLocked() string {
 	var ch byte
 	switch raft.state {
 	case follower:
@@ -208,30 +224,62 @@ func (raft *Raft) String() string {
 		ch = 'L'
 
 	default:
-		panic("unknown state")
+		assert(false, "unknown state")
 	}
-	return fmt.Sprintf("%d[%c %d %03d/%02d %s %d %d]", raft.self, ch,
-		raft.currentTerm, raft.time0, raft.time1,
-		raft.yeaVotesToString(), raft.votedFor, raft.currentLeader)
+	var pd string
+	for _, id := range raft.idList() {
+		if id != raft.self {
+			peer := raft.peers[id]
+			pd += fmt.Sprintf("%d:%d,%d ", id, peer.nextIndex, peer.matchIndex)
+		}
+	}
+	if len(pd) > 0 {
+		pd = pd[0 : len(pd)-1]
+	}
+	return fmt.Sprintf("%d[%c %d %03d/%02d %s %d %d] (%s) {%v} <%v>", raft.self, ch,
+		raft.currentTerm, raft.electionTimer, raft.heartbeatTimer,
+		raft.yeaVotesToString(), raft.votedFor, raft.currentLeader,
+		pd, raft.sm, raft.log)
+}
+
+func (raft *Raft) yeaVotesToString() string {
+	var buf bytes.Buffer
+	for _, id := range raft.idList() {
+		if raft.peers[id].yeaVote {
+			fmt.Fprintf(&buf, "%d", id)
+		} else {
+			buf.Write([]byte("."))
+		}
+	}
+	return buf.String()
+}
+
+func (raft *Raft) idList() []PeerId {
+	idList := make([]PeerId, 0, len(raft.peers))
+	for id := range raft.peers {
+		idList = append(idList, id)
+	}
+	sort.Sort(byId(idList))
+	return idList
 }
 
 func (raft *Raft) loop() {
-	var buf [16]byte
+	var buf [1024]byte
 	for {
 		size, pktAddr, err := raft.conn.ReadFromUDP(buf[:])
 		if err != nil {
 			operr, ok := err.(*net.OpError)
 			if !ok || operr.Op != "read" || operr.Err.Error() != "use of closed network connection" {
-				log.Printf("raft: %#v", err)
+				log.Printf("go-raft: %#v", err)
 			}
 			break
 		}
-		pkt := packet.Unpack(buf[:size])
+		pkt := Unpack(buf[:size])
 		if pkt != nil {
-			var pktId packet.PeerId
+			var pktId PeerId
 			raft.mutex.Lock()
-			for id, addr := range raft.peers {
-				if equalUDPAddr(pktAddr, addr) {
+			for id, peer := range raft.peers {
+				if equalUDPAddr(pktAddr, peer.addr) {
 					pktId = id
 					break
 				}
@@ -247,19 +295,19 @@ func (raft *Raft) loop() {
 }
 
 var faultInjectorMutex sync.Mutex
-var faultInjectorFunction func(from, to packet.PeerId) bool
+var faultInjectorFunction func(from, to PeerId) bool
 
 // SetFaultInjectorFunction assigns a fault injector function.  If the fault
 // injector function is non-nil, then it is called with the source and
 // destination PeerId values.  If the function then returns true, a fault is
 // injected and the packet is dropped.
-func SetFaultInjectorFunction(fn func(from, to packet.PeerId) bool) {
+func SetFaultInjectorFunction(fn func(from, to PeerId) bool) {
 	faultInjectorMutex.Lock()
 	faultInjectorFunction = fn
 	faultInjectorMutex.Unlock()
 }
 
-func (raft *Raft) send(to packet.PeerId, p packet.Packet) {
+func (raft *Raft) send(to PeerId, p Packet) {
 	faultInjectorMutex.Lock()
 	fn := faultInjectorFunction
 	faultInjectorMutex.Unlock()
@@ -267,53 +315,82 @@ func (raft *Raft) send(to packet.PeerId, p packet.Packet) {
 		return
 	}
 	buf := p.Pack()
-	addr := raft.peers[to]
-	_, err := raft.conn.WriteToUDP(buf, addr)
+	peer := raft.peers[to]
+	_, err := raft.conn.WriteToUDP(buf, peer.addr)
 	if err != nil {
-		log.Printf("raft: %v", err)
+		log.Printf("go-raft: %v", err)
 	}
 }
 
-func (raft *Raft) sendNotVoted(p packet.Packet) {
-	for id := range raft.peers {
-		if _, found := raft.yeaVotes[id]; !found {
-			raft.send(id, p)
+func (raft *Raft) sendVoteRequests() {
+	latestIndex := raft.log.LatestIndex()
+	latestTerm := raft.log.Term(latestIndex)
+	for id, peer := range raft.peers {
+		if !peer.yeaVote {
+			raft.send(id, VoteRequest{
+				Term:        raft.currentTerm,
+				LatestTerm:  latestTerm,
+				LatestIndex: latestIndex,
+			})
 		}
 	}
 }
 
-func (raft *Raft) sendAllButSelfAndSource(from packet.PeerId, p packet.Packet) {
-	for id := range raft.peers {
-		if id != raft.self && id != from {
-			raft.send(id, p)
+func (raft *Raft) sendAppendEntries() {
+	for _, id := range raft.idList() {
+		if id == raft.self {
+			continue
 		}
+		peer := raft.peers[id]
+		latestIndex := raft.log.LatestIndex()
+		peerLatestIndex := peer.nextIndex - 1
+		peerLatestTerm := raft.log.Term(peerLatestIndex)
+		assert(peerLatestIndex <= latestIndex, "peerLatestIndex=%d > latestIndex=%d", peerLatestIndex, latestIndex)
+		n := minIndex(latestIndex, peerLatestIndex+8)
+		numEntries := n - peerLatestIndex
+		entries := make([]AppendEntry, 0, numEntries)
+		for index := peerLatestIndex + 1; index <= n; index++ {
+			entry := raft.log.At(index)
+			entries = append(entries, AppendEntry{
+				Term:    entry.Term,
+				Command: entry.Command,
+			})
+		}
+		commitIndex := minIndex(raft.log.CommitIndex, peerLatestIndex+Index(len(entries)))
+		raft.send(id, AppendEntriesRequest{
+			Term:         raft.currentTerm,
+			PrevLogTerm:  peerLatestTerm,
+			PrevLogIndex: peerLatestIndex,
+			LeaderCommit: commitIndex,
+			Entries:      entries,
+		})
 	}
 }
 
-func (raft *Raft) recv(from packet.PeerId, p packet.Packet) {
+func (raft *Raft) recv(from PeerId, pkt Packet) {
 	raft.mutex.Lock()
 	origState := raft.state
-	switch v := p.(type) {
-	case packet.VoteRequest:
+	switch v := pkt.(type) {
+	case VoteRequest:
 		raft.recvVoteRequest(from, v)
 
-	case packet.VoteResponse:
+	case VoteResponse:
 		raft.recvVoteResponse(from, v)
 
-	case packet.HeartbeatRequest:
-		raft.recvHeartbeatRequest(from, v)
+	case AppendEntriesRequest:
+		raft.recvAppendEntriesRequest(from, v)
 
-	case packet.HeartbeatResponse:
-		raft.recvHeartbeatResponse(from, v)
+	case AppendEntriesResponse:
+		raft.recvAppendEntriesResponse(from, v)
 
-	case packet.NominateRequest:
+	case NominateRequest:
 		raft.recvNominateRequest(from, v)
 
-	case packet.InformRequest:
+	case InformRequest:
 		raft.recvInformRequest(from, v)
 
 	default:
-		panic(fmt.Sprintf("unknown type %T", p))
+		assert(false, "unknown type %T", pkt)
 	}
 	var fns []func(*Raft)
 	if raft.inLonelyState && raft.currentLeader != 0 {
@@ -332,134 +409,205 @@ func (raft *Raft) recv(from packet.PeerId, p packet.Packet) {
 	}
 }
 
-func (raft *Raft) recvVoteRequest(from packet.PeerId, pkt packet.VoteRequest) {
-	granted := false
-	switch {
-	case pkt.Term > raft.currentTerm:
-		raft.becomeFollower()
-		raft.votedFor = from
-		raft.currentTerm = pkt.Term
-		granted = true
-
-	case pkt.Term == raft.currentTerm && (raft.votedFor == 0 || raft.votedFor == from):
-		raft.votedFor = from
-		raft.time0 = 50 + uint32(rand.Intn(100))
-		granted = true
+func (raft *Raft) recvVoteRequest(from PeerId, pkt VoteRequest) {
+	latestIndex := raft.log.LatestIndex()
+	latestTerm := raft.log.Term(latestIndex)
+	logIsOK := (pkt.LatestTerm > latestTerm || (pkt.LatestTerm == latestTerm && pkt.LatestIndex >= latestIndex))
+	alreadyVoted := (pkt.Term == raft.currentTerm && raft.votedFor != 0 && raft.votedFor != from)
+	if pkt.Term > raft.currentTerm {
+		raft.becomeFollower(pkt.Term, from, 0)
 	}
-	raft.send(from, packet.VoteResponse{raft.currentTerm, granted})
+	granted := (pkt.Term == raft.currentTerm && logIsOK && !alreadyVoted)
+	raft.send(from, VoteResponse{
+		Term:    raft.currentTerm,
+		Granted: granted,
+		LogIsOK: logIsOK,
+	})
 }
 
-func (raft *Raft) recvVoteResponse(from packet.PeerId, pkt packet.VoteResponse) {
-	switch {
-	case pkt.Term > raft.currentTerm:
-		raft.becomeFollower()
-		raft.currentTerm = pkt.Term
-
-	case pkt.Term == raft.currentTerm && raft.state == candidate && pkt.Granted:
-		raft.yeaVotes[from] = struct{}{}
-		if len(raft.yeaVotes) >= raft.Quorum() {
-			raft.state = leader
-			raft.currentLeader = raft.self
-			raft.lastLeaderTerm = raft.currentTerm
-			raft.time0 = 50 + uint32(rand.Intn(100))
-			raft.time1 = 5 + uint32(rand.Intn(10))
-			raft.currentNonce = 0
-			raft.yeaVotes = make(map[packet.PeerId]struct{}, len(raft.peers))
-			raft.yeaVotes[raft.self] = struct{}{}
-			raft.sendNotVoted(packet.HeartbeatRequest{raft.currentTerm, raft.currentNonce})
+func (raft *Raft) recvVoteResponse(from PeerId, pkt VoteResponse) {
+	if pkt.Term < raft.currentTerm {
+		return
+	}
+	if pkt.Term > raft.currentTerm {
+		raft.becomeFollower(pkt.Term, 0, 0)
+		return
+	}
+	if raft.state != candidate {
+		return
+	}
+	if pkt.Granted {
+		raft.peers[from].yeaVote = true
+		if raft.yeaVotes() >= raft.quorumLocked() {
+			raft.becomeLeader()
+		}
+	} else {
+		if !pkt.LogIsOK {
+			raft.becomeFollower(pkt.Term, 0, 0)
+			raft.send(from, NominateRequest{
+				Term: raft.currentTerm,
+			})
 		}
 	}
 }
 
-func (raft *Raft) recvHeartbeatRequest(from packet.PeerId, pkt packet.HeartbeatRequest) {
-	success := false
-	switch {
-	case pkt.Term > raft.currentTerm:
-		raft.becomeFollower()
-		raft.votedFor = from
-		raft.currentLeader = from
-		raft.currentTerm = pkt.Term
-		raft.lastLeaderTerm = raft.currentTerm
-		success = true
+func (raft *Raft) recvAppendEntriesRequest(from PeerId, pkt AppendEntriesRequest) {
+	entries := pkt.Entries
+	firstIndex := pkt.PrevLogIndex + 1
+	lastCommittedIndex := minIndex(firstIndex+Index(len(entries)), raft.log.CommitIndex)
 
-	case pkt.Term == raft.currentTerm && raft.state != leader:
-		raft.becomeFollower()
-		raft.votedFor = from
-		raft.currentLeader = from
-		raft.lastLeaderTerm = raft.currentTerm
-		success = true
+	if pkt.Term < raft.currentTerm {
+		goto Reject
 	}
-	raft.send(from, packet.HeartbeatResponse{raft.currentTerm, pkt.Nonce, success})
-	raft.sendAllButSelfAndSource(from, packet.InformRequest{raft.currentTerm, raft.currentLeader})
+	if raft.state == leader && pkt.Term == raft.currentTerm {
+		log.Printf("go-raft: AppendEntriesRequest sent to leader")
+		goto Reject
+	}
+
+	raft.becomeFollower(pkt.Term, from, from)
+	raft.log.checkInvariants()
+	if pkt.PrevLogIndex >= raft.log.NextIndex() {
+		goto Reject
+	}
+	if raft.log.Term(pkt.PrevLogIndex) != pkt.PrevLogTerm {
+		goto Reject
+	}
+	for firstIndex < lastCommittedIndex {
+		if firstIndex >= raft.log.StartIndex && firstIndex < raft.log.NextIndex() {
+			if raft.log.Term(pkt.PrevLogIndex) != entries[0].Term {
+				goto Reject
+			}
+			assert(bytes.Equal(raft.log.At(pkt.PrevLogIndex).Command, entries[0].Command), "")
+		}
+		firstIndex++
+		entries = entries[1:]
+	}
+	for i, entry := range entries {
+		index := firstIndex + Index(i)
+		if index >= raft.log.StartIndex {
+			if index < raft.log.NextIndex() && raft.log.Term(index) != entry.Term {
+				raft.log.DeleteEntriesAfter(index - 1)
+				assert(raft.log.NextIndex() == index, "new item index mismatch: expected %d got %d", raft.log.NextIndex(), index)
+			}
+			raft.log.Append(entry.Term, entry.Command, nil)
+		}
+	}
+	raft.commitTo(pkt.LeaderCommit)
+	raft.send(from, AppendEntriesResponse{
+		Success:     true,
+		Term:        raft.currentTerm,
+		LatestIndex: raft.log.LatestIndex(),
+		CommitIndex: raft.log.CommitIndex,
+	})
+	for _, id := range raft.idList() {
+		if id != raft.self && id != from {
+			raft.send(id, InformRequest{
+				Term:   raft.currentTerm,
+				Leader: raft.currentLeader,
+			})
+		}
+	}
+	return
+
+Reject:
+	raft.send(from, AppendEntriesResponse{
+		Success:     false,
+		Term:        raft.currentTerm,
+		LatestIndex: raft.log.LatestIndex(),
+		CommitIndex: raft.log.CommitIndex,
+	})
 }
 
-func (raft *Raft) recvHeartbeatResponse(from packet.PeerId, pkt packet.HeartbeatResponse) {
-	switch {
-	case pkt.Term > raft.currentTerm:
-		raft.becomeFollower()
-		raft.currentTerm = pkt.Term
-
-	case pkt.Term == raft.currentTerm && raft.state == leader && pkt.Nonce == raft.currentNonce && pkt.Success:
-		raft.yeaVotes[from] = struct{}{}
-		if len(raft.yeaVotes) >= raft.Quorum() {
-			raft.currentNonce += 1
-			raft.time0 = 50 + uint32(rand.Intn(100))
+func (raft *Raft) recvAppendEntriesResponse(from PeerId, pkt AppendEntriesResponse) {
+	if pkt.Term > raft.currentTerm {
+		raft.becomeFollower(pkt.Term, 0, 0)
+		return
+	}
+	if pkt.Term < raft.currentTerm {
+		return
+	}
+	if raft.state != leader {
+		log.Print("go-raft: AppendEntriesResponse sent to non-leader")
+		return
+	}
+	peer := raft.peers[from]
+	if pkt.Success {
+		prevLogIndex := peer.nextIndex - 1
+		numEntries := pkt.LatestIndex - prevLogIndex
+		assert(peer.matchIndex <= prevLogIndex+numEntries, "%#v matchIndex went backward: old=%d new=%d+%d", from, peer.matchIndex, prevLogIndex, numEntries)
+		peer.matchIndex = prevLogIndex + numEntries
+		newCommitIndex := raft.matchConsensus()
+		if raft.log.Term(newCommitIndex) == raft.currentTerm {
+			raft.commitTo(newCommitIndex)
+		}
+		peer.nextIndex = peer.matchIndex + 1
+	} else {
+		if peer.nextIndex > 1 {
+			peer.nextIndex--
+		}
+		if peer.nextIndex > pkt.LatestIndex+1 {
+			peer.nextIndex = pkt.LatestIndex + 1
+		}
+	}
+	peer.yeaVote = true
+	if raft.yeaVotes() >= raft.quorumLocked() {
+		raft.electionTimer = raft.newElectionTimer()
+		for id, peer := range raft.peers {
+			peer.yeaVote = (id == raft.self)
 		}
 	}
 }
 
-func (raft *Raft) recvNominateRequest(from packet.PeerId, pkt packet.NominateRequest) {
-	switch {
-	case pkt.Term > raft.currentTerm:
-		raft.becomeFollower()
-		raft.currentTerm = pkt.Term
-		raft.becomeCandidate()
-
-	case pkt.Term == raft.currentTerm && raft.state == follower:
-		raft.becomeCandidate()
+func (raft *Raft) recvNominateRequest(from PeerId, pkt NominateRequest) {
+	if pkt.Term > raft.currentTerm {
+		raft.becomeFollower(pkt.Term, 0, 0)
 	}
+	if pkt.Term < raft.currentTerm {
+		return
+	}
+	if raft.state == leader {
+		return
+	}
+	raft.becomeCandidate()
 }
 
-func (raft *Raft) recvInformRequest(from packet.PeerId, pkt packet.InformRequest) {
-	switch {
-	case pkt.Term > raft.currentTerm:
-		raft.becomeFollower()
-		raft.currentTerm = pkt.Term
-		raft.currentLeader = pkt.Leader
-		raft.lastLeaderTerm = raft.currentTerm
-		raft.send(from, packet.NominateRequest{raft.currentTerm})
-
-	case pkt.Term == raft.currentTerm && raft.currentLeader != pkt.Leader:
-		raft.becomeFollower()
-		raft.currentLeader = pkt.Leader
-		raft.lastLeaderTerm = raft.currentTerm
-		raft.send(from, packet.NominateRequest{raft.currentTerm})
+func (raft *Raft) recvInformRequest(from PeerId, pkt InformRequest) {
+	if pkt.Term < raft.currentTerm {
+		return
 	}
+	if pkt.Term == raft.currentTerm && (raft.currentLeader == pkt.Leader || raft.currentLeader == 0) {
+		return
+	}
+
+	raft.becomeFollower(pkt.Term, pkt.Leader, pkt.Leader)
+	raft.send(from, NominateRequest{
+		Term: raft.currentTerm,
+	})
 }
 
 func (raft *Raft) Tick() {
 	raft.mutex.Lock()
 	origState := raft.state
-	if raft.time0 > 0 {
-		raft.time0 -= 1
+	if raft.electionTimer > 0 {
+		raft.electionTimer--
 	}
-	if raft.time1 > 0 {
-		raft.time1 -= 1
+	if raft.heartbeatTimer > 0 {
+		raft.heartbeatTimer--
 	}
 	switch {
-	case raft.time0 == 0:
+	case raft.electionTimer == 0:
 		raft.becomeCandidate()
 
-	case raft.state == candidate && raft.time1 == 0:
-		raft.time1 = 5 + uint32(rand.Intn(10))
-		raft.sendNotVoted(packet.VoteRequest{raft.currentTerm})
+	case raft.state == candidate && raft.heartbeatTimer == 0:
+		raft.heartbeatTimer = raft.newHeartbeatTimer()
+		raft.sendVoteRequests()
 
-	case raft.state == leader && raft.time1 == 0:
-		raft.currentNonce += 1
-		raft.time1 = 5 + uint32(rand.Intn(10))
-		raft.yeaVotes = make(map[packet.PeerId]struct{}, len(raft.peers))
-		raft.yeaVotes[raft.self] = struct{}{}
-		raft.sendNotVoted(packet.HeartbeatRequest{raft.currentTerm, raft.currentNonce})
+	case raft.state == leader && raft.heartbeatTimer == 0:
+		raft.heartbeatTimer = raft.newHeartbeatTimer()
+		for id, peer := range raft.peers {
+			peer.yeaVote = (id == raft.self)
+		}
+		raft.sendAppendEntries()
 	}
 	var fn func(*Raft)
 	switch {
@@ -477,80 +625,109 @@ func (raft *Raft) Tick() {
 	}
 }
 
-func (raft *Raft) becomeFollower() {
+func (raft *Raft) becomeFollower(term Term, voteFor PeerId, leader PeerId) {
 	raft.state = follower
-	raft.votedFor = 0
-	raft.currentLeader = 0
-	raft.time0 = 50 + uint32(rand.Intn(100))
-	raft.time1 = 0
-	raft.currentNonce = 0
-	raft.yeaVotes = nil
+	raft.currentTerm = term
+	raft.votedFor = voteFor
+	raft.currentLeader = leader
+	if leader != 0 {
+		raft.lastLeaderTerm = term
+	}
+	raft.electionTimer = raft.newElectionTimer()
+	raft.heartbeatTimer = 0 // unused
+	for _, peer := range raft.peers {
+		peer.yeaVote = false // unused
+		peer.nextIndex = 0   // unused
+		peer.matchIndex = 0  // unused
+	}
 }
 
 func (raft *Raft) becomeCandidate() {
 	raft.state = candidate
+	raft.votedFor = raft.self
 	raft.currentLeader = 0
 	raft.currentTerm += 1
-	raft.votedFor = raft.self
-	raft.time0 = 50 + uint32(rand.Intn(100))
-	raft.time1 = 5 + uint32(rand.Intn(10))
-	raft.currentNonce = 0
-	raft.yeaVotes = make(map[packet.PeerId]struct{}, len(raft.peers))
-	raft.yeaVotes[raft.self] = struct{}{}
-	if len(raft.yeaVotes) >= raft.Quorum() {
-		raft.state = leader
-		raft.sendNotVoted(packet.HeartbeatRequest{raft.currentTerm, raft.currentNonce})
+	raft.electionTimer = raft.newElectionTimer()
+	raft.heartbeatTimer = raft.newHeartbeatTimer()
+	for id, peer := range raft.peers {
+		peer.yeaVote = (id == raft.self)
+		peer.nextIndex = 0  // unused
+		peer.matchIndex = 0 // unused
+	}
+	if raft.yeaVotes() >= raft.quorumLocked() {
+		raft.becomeLeader()
 	} else {
-		raft.sendNotVoted(packet.VoteRequest{raft.currentTerm})
+		raft.sendVoteRequests()
 	}
 }
 
-func equalUDPAddr(a, b *net.UDPAddr) bool {
-	return a.IP.Equal(b.IP) && a.Port == b.Port && a.Zone == b.Zone
+func (raft *Raft) becomeLeader() {
+	raft.state = leader
+	raft.currentLeader = raft.self
+	raft.lastLeaderTerm = raft.currentTerm
+	raft.electionTimer = raft.newElectionTimer()
+	raft.heartbeatTimer = raft.newHeartbeatTimer()
+	for id, peer := range raft.peers {
+		peer.yeaVote = (id == raft.self)
+		peer.nextIndex = raft.log.NextIndex()
+		peer.matchIndex = 0
+	}
+	raft.log.Append(raft.currentTerm, nil, nil)
+	raft.sendAppendEntries()
 }
 
-type byId []packet.PeerId
+func (raft *Raft) newElectionTimer() uint32 {
+	return 100 + uint32(raft.rand.Intn(50))
+}
 
-func (x byId) Len() int           { return len(x) }
-func (x byId) Less(i, j int) bool { return x[i] < x[j] }
-func (x byId) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
+func (raft *Raft) newHeartbeatTimer() uint32 {
+	return 10 + uint32(raft.rand.Intn(5))
+}
 
-func (raft *Raft) yeaVotesToString() string {
-	idList := make([]packet.PeerId, 0, len(raft.peers))
-	for id := range raft.peers {
-		idList = append(idList, id)
-	}
-	sort.Sort(byId(idList))
-	var buf bytes.Buffer
-	for _, id := range idList {
-		if _, found := raft.yeaVotes[id]; found {
-			fmt.Fprintf(&buf, "%d", id)
-		} else {
-			buf.Write([]byte("."))
+func (raft *Raft) matchConsensus() Index {
+	values := make([]Index, 0, len(raft.peers))
+	values = append(values, raft.log.LatestIndex())
+	for id, peer := range raft.peers {
+		if id != raft.self {
+			values = append(values, peer.matchIndex)
 		}
 	}
-	return buf.String()
+	sort.Sort(byIndex(values))
+	i := (len(values) - 1) / 2
+	return values[i]
 }
 
-func processConfig(cfg *Config) (map[packet.PeerId]*net.UDPAddr, error) {
+func (raft *Raft) commitTo(newCommitIndex Index) {
+	for raft.log.CommitIndex < newCommitIndex {
+		raft.log.CommitIndex++
+		entry := raft.log.At(raft.log.CommitIndex)
+		if len(entry.Command) > 0 {
+			raft.sm.Commit(entry.Command)
+		}
+		if entry.Callback != nil {
+			entry.Callback(true)
+		}
+	}
+}
+
+func processConfig(cfg *Config) (map[PeerId]*peerData, error) {
 	if len(cfg.Peers) == 0 {
 		return nil, fmt.Errorf("must configure at least one Raft node")
 	}
-	result := make(map[packet.PeerId]*net.UDPAddr, len(cfg.Peers))
+	result := make(map[PeerId]*peerData, len(cfg.Peers))
 	for _, item := range cfg.Peers {
-		id := packet.PeerId(item.Id)
+		id := PeerId(item.Id)
 		if id == 0 {
 			return nil, fmt.Errorf("invalid id: 0")
 		}
-		_, found := result[id]
-		if found {
+		if _, found := result[id]; found {
 			return nil, fmt.Errorf("duplicate id: %d", id)
 		}
 		addr, err := net.ResolveUDPAddr("udp", item.Addr)
 		if err != nil {
 			return nil, err
 		}
-		result[id] = addr
+		result[id] = &peerData{addr: addr}
 	}
 	return result, nil
 }
