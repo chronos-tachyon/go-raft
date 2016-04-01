@@ -13,16 +13,16 @@ type LogEntry struct {
 
 type Log struct {
 	// The Term of the hypothetical entry before Entries.
-	StartTerm   Term
+	StartTerm Term
 
 	// The index of the first entry in Entries.
-	StartIndex  Index
+	StartIndex Index
 
 	// The index of the most recently committed entry.
 	CommitIndex Index
 
 	// The unsnapshotted entries.
-	Entries     []LogEntry
+	Entries []LogEntry
 }
 
 func NewLog() *Log {
@@ -88,7 +88,7 @@ func (log *Log) DeleteEntriesAfter(index Index) {
 		return
 	}
 	if index < log.LatestIndex() {
-		log.Entries = log.Entries[0 : index - log.StartIndex + 1]
+		log.Entries = log.Entries[0 : index-log.StartIndex+1]
 	}
 	log.checkInvariants()
 }
@@ -106,7 +106,7 @@ func (log *Log) String() string {
 		entries += fmt.Sprintf("%d,", entry.Term)
 	}
 	if len(entries) > 0 {
-		entries = entries[0:len(entries)-1]
+		entries = entries[0 : len(entries)-1]
 	}
 	return fmt.Sprintf("%d %d %d [%s]", log.StartTerm, log.StartIndex, log.CommitIndex, entries)
 }

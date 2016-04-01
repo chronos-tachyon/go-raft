@@ -174,7 +174,7 @@ func (raft *Raft) Nominate(id PeerId) {
 			raft.becomeCandidate()
 		}
 	} else {
-		raft.send(id, NominateRequest{
+		raft.send(id, nominateRequest{
 			Term: raft.currentTerm,
 		})
 	}
@@ -274,7 +274,7 @@ func (raft *Raft) loop() {
 			}
 			break
 		}
-		pkt := Unpack(buf[:size])
+		pkt := unpack(buf[:size])
 		if pkt != nil {
 			var pktId PeerId
 			raft.mutex.Lock()
@@ -307,14 +307,14 @@ func SetFaultInjectorFunction(fn func(from, to PeerId) bool) {
 	faultInjectorMutex.Unlock()
 }
 
-func (raft *Raft) send(to PeerId, p Packet) {
+func (raft *Raft) send(to PeerId, p packet) {
 	faultInjectorMutex.Lock()
 	fn := faultInjectorFunction
 	faultInjectorMutex.Unlock()
 	if fn != nil && fn(raft.self, to) {
 		return
 	}
-	buf := p.Pack()
+	buf := p.pack()
 	peer := raft.peers[to]
 	_, err := raft.conn.WriteToUDP(buf, peer.addr)
 	if err != nil {
@@ -327,7 +327,7 @@ func (raft *Raft) sendVoteRequests() {
 	latestTerm := raft.log.Term(latestIndex)
 	for id, peer := range raft.peers {
 		if !peer.yeaVote {
-			raft.send(id, VoteRequest{
+			raft.send(id, voteRequest{
 				Term:        raft.currentTerm,
 				LatestTerm:  latestTerm,
 				LatestIndex: latestIndex,
@@ -348,16 +348,16 @@ func (raft *Raft) sendAppendEntries() {
 		assert(peerLatestIndex <= latestIndex, "peerLatestIndex=%d > latestIndex=%d", peerLatestIndex, latestIndex)
 		n := minIndex(latestIndex, peerLatestIndex+8)
 		numEntries := n - peerLatestIndex
-		entries := make([]AppendEntry, 0, numEntries)
+		entries := make([]appendEntry, 0, numEntries)
 		for index := peerLatestIndex + 1; index <= n; index++ {
 			entry := raft.log.At(index)
-			entries = append(entries, AppendEntry{
+			entries = append(entries, appendEntry{
 				Term:    entry.Term,
 				Command: entry.Command,
 			})
 		}
 		commitIndex := minIndex(raft.log.CommitIndex, peerLatestIndex+Index(len(entries)))
-		raft.send(id, AppendEntriesRequest{
+		raft.send(id, appendEntriesRequest{
 			Term:         raft.currentTerm,
 			PrevLogTerm:  peerLatestTerm,
 			PrevLogIndex: peerLatestIndex,
@@ -367,26 +367,26 @@ func (raft *Raft) sendAppendEntries() {
 	}
 }
 
-func (raft *Raft) recv(from PeerId, pkt Packet) {
+func (raft *Raft) recv(from PeerId, pkt packet) {
 	raft.mutex.Lock()
 	origState := raft.state
 	switch v := pkt.(type) {
-	case VoteRequest:
+	case voteRequest:
 		raft.recvVoteRequest(from, v)
 
-	case VoteResponse:
+	case voteResponse:
 		raft.recvVoteResponse(from, v)
 
-	case AppendEntriesRequest:
+	case appendEntriesRequest:
 		raft.recvAppendEntriesRequest(from, v)
 
-	case AppendEntriesResponse:
+	case appendEntriesResponse:
 		raft.recvAppendEntriesResponse(from, v)
 
-	case NominateRequest:
+	case nominateRequest:
 		raft.recvNominateRequest(from, v)
 
-	case InformRequest:
+	case informRequest:
 		raft.recvInformRequest(from, v)
 
 	default:
@@ -409,7 +409,7 @@ func (raft *Raft) recv(from PeerId, pkt Packet) {
 	}
 }
 
-func (raft *Raft) recvVoteRequest(from PeerId, pkt VoteRequest) {
+func (raft *Raft) recvVoteRequest(from PeerId, pkt voteRequest) {
 	latestIndex := raft.log.LatestIndex()
 	latestTerm := raft.log.Term(latestIndex)
 	logIsOK := (pkt.LatestTerm > latestTerm || (pkt.LatestTerm == latestTerm && pkt.LatestIndex >= latestIndex))
@@ -418,14 +418,14 @@ func (raft *Raft) recvVoteRequest(from PeerId, pkt VoteRequest) {
 		raft.becomeFollower(pkt.Term, from, 0)
 	}
 	granted := (pkt.Term == raft.currentTerm && logIsOK && !alreadyVoted)
-	raft.send(from, VoteResponse{
+	raft.send(from, voteResponse{
 		Term:    raft.currentTerm,
 		Granted: granted,
 		LogIsOK: logIsOK,
 	})
 }
 
-func (raft *Raft) recvVoteResponse(from PeerId, pkt VoteResponse) {
+func (raft *Raft) recvVoteResponse(from PeerId, pkt voteResponse) {
 	if pkt.Term < raft.currentTerm {
 		return
 	}
@@ -444,14 +444,14 @@ func (raft *Raft) recvVoteResponse(from PeerId, pkt VoteResponse) {
 	} else {
 		if !pkt.LogIsOK {
 			raft.becomeFollower(pkt.Term, 0, 0)
-			raft.send(from, NominateRequest{
+			raft.send(from, nominateRequest{
 				Term: raft.currentTerm,
 			})
 		}
 	}
 }
 
-func (raft *Raft) recvAppendEntriesRequest(from PeerId, pkt AppendEntriesRequest) {
+func (raft *Raft) recvAppendEntriesRequest(from PeerId, pkt appendEntriesRequest) {
 	entries := pkt.Entries
 	firstIndex := pkt.PrevLogIndex + 1
 	lastCommittedIndex := minIndex(firstIndex+Index(len(entries)), raft.log.CommitIndex)
@@ -493,7 +493,7 @@ func (raft *Raft) recvAppendEntriesRequest(from PeerId, pkt AppendEntriesRequest
 		}
 	}
 	raft.commitTo(pkt.LeaderCommit)
-	raft.send(from, AppendEntriesResponse{
+	raft.send(from, appendEntriesResponse{
 		Success:     true,
 		Term:        raft.currentTerm,
 		LatestIndex: raft.log.LatestIndex(),
@@ -501,7 +501,7 @@ func (raft *Raft) recvAppendEntriesRequest(from PeerId, pkt AppendEntriesRequest
 	})
 	for _, id := range raft.idList() {
 		if id != raft.self && id != from {
-			raft.send(id, InformRequest{
+			raft.send(id, informRequest{
 				Term:   raft.currentTerm,
 				Leader: raft.currentLeader,
 			})
@@ -510,7 +510,7 @@ func (raft *Raft) recvAppendEntriesRequest(from PeerId, pkt AppendEntriesRequest
 	return
 
 Reject:
-	raft.send(from, AppendEntriesResponse{
+	raft.send(from, appendEntriesResponse{
 		Success:     false,
 		Term:        raft.currentTerm,
 		LatestIndex: raft.log.LatestIndex(),
@@ -518,7 +518,7 @@ Reject:
 	})
 }
 
-func (raft *Raft) recvAppendEntriesResponse(from PeerId, pkt AppendEntriesResponse) {
+func (raft *Raft) recvAppendEntriesResponse(from PeerId, pkt appendEntriesResponse) {
 	if pkt.Term > raft.currentTerm {
 		raft.becomeFollower(pkt.Term, 0, 0)
 		return
@@ -558,7 +558,7 @@ func (raft *Raft) recvAppendEntriesResponse(from PeerId, pkt AppendEntriesRespon
 	}
 }
 
-func (raft *Raft) recvNominateRequest(from PeerId, pkt NominateRequest) {
+func (raft *Raft) recvNominateRequest(from PeerId, pkt nominateRequest) {
 	if pkt.Term > raft.currentTerm {
 		raft.becomeFollower(pkt.Term, 0, 0)
 	}
@@ -571,7 +571,7 @@ func (raft *Raft) recvNominateRequest(from PeerId, pkt NominateRequest) {
 	raft.becomeCandidate()
 }
 
-func (raft *Raft) recvInformRequest(from PeerId, pkt InformRequest) {
+func (raft *Raft) recvInformRequest(from PeerId, pkt informRequest) {
 	if pkt.Term < raft.currentTerm {
 		return
 	}
@@ -580,7 +580,7 @@ func (raft *Raft) recvInformRequest(from PeerId, pkt InformRequest) {
 	}
 
 	raft.becomeFollower(pkt.Term, pkt.Leader, pkt.Leader)
-	raft.send(from, NominateRequest{
+	raft.send(from, nominateRequest{
 		Term: raft.currentTerm,
 	})
 }

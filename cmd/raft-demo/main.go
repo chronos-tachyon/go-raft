@@ -129,11 +129,7 @@ func main() {
 	showRafts(peers)
 	for atomic.LoadUint32(&signaled) == 0 {
 		tickCount++
-		if true || tickCount < 135 {
-			time.Sleep(50 * time.Millisecond)
-		} else {
-			time.Sleep(1000 * time.Millisecond)
-		}
+		time.Sleep(5 * time.Millisecond)
 		switch tickCount {
 		case 40:
 			fmt.Println("--- BANG! 1 ---")

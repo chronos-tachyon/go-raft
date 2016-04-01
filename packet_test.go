@@ -6,12 +6,12 @@ import (
 )
 
 func TestVoteRequest(t *testing.T) {
-	for i, before := range []VoteRequest{
-		VoteRequest{},
-		VoteRequest{5, 3, 42},
+	for i, before := range []voteRequest{
+		{},
+		{5, 3, 42},
 	} {
-		packed := before.Pack()
-		after := Unpack(packed).(VoteRequest)
+		packed := before.pack()
+		after := unpack(packed).(voteRequest)
 		if before != after {
 			t.Errorf("[%d] failed to round-trip: expected %#v, got %#v", i, before, after)
 		}
@@ -19,15 +19,15 @@ func TestVoteRequest(t *testing.T) {
 }
 
 func TestVoteResponse(t *testing.T) {
-	for i, before := range []VoteResponse{
-		VoteResponse{},
-		VoteResponse{3, false, false},
-		VoteResponse{5, true, false},
-		VoteResponse{7, false, true},
-		VoteResponse{9, true, true},
+	for i, before := range []voteResponse{
+		{},
+		{3, false, false},
+		{5, true, false},
+		{7, false, true},
+		{9, true, true},
 	} {
-		packed := before.Pack()
-		after := Unpack(packed).(VoteResponse)
+		packed := before.pack()
+		after := unpack(packed).(voteResponse)
 		if before != after {
 			t.Errorf("[%d] failed to round-trip: expected %#v, got %#v", i, before, after)
 		}
@@ -40,17 +40,17 @@ func TestAppendEntriesRequest(t *testing.T) {
 	c := []byte{'2', '2'}
 	d := []byte(nil)
 
-	for i, before := range []AppendEntriesRequest{
-		AppendEntriesRequest{},
-		AppendEntriesRequest{5, 3, 42, 50, []AppendEntry{
-			AppendEntry{3, a},
-			AppendEntry{3, b},
-			AppendEntry{3, c},
-			AppendEntry{4, d},
+	for i, before := range []appendEntriesRequest{
+		{},
+		{5, 3, 42, 50, []appendEntry{
+			{3, a},
+			{3, b},
+			{3, c},
+			{4, d},
 		}},
 	} {
-		packed := before.Pack()
-		after := Unpack(packed).(AppendEntriesRequest)
+		packed := before.pack()
+		after := unpack(packed).(appendEntriesRequest)
 		if !equalAppendEntriesRequest(before, after) {
 			t.Errorf("[%d] failed to round-trip: expected %#v, got %#v", i, before, after)
 		}
@@ -58,41 +58,41 @@ func TestAppendEntriesRequest(t *testing.T) {
 }
 
 func TestAppendEntriesResponse(t *testing.T) {
-	before := AppendEntriesResponse{
+	before := appendEntriesResponse{
 		Term:    5,
 		Success: true,
 	}
-	packed := before.Pack()
-	after := Unpack(packed).(AppendEntriesResponse)
+	packed := before.pack()
+	after := unpack(packed).(appendEntriesResponse)
 	if before != after {
 		t.Errorf("failed to round-trip: expected %#v, got %#v", before, after)
 	}
 }
 
 func TestNominateRequest(t *testing.T) {
-	before := NominateRequest{
+	before := nominateRequest{
 		Term: 5,
 	}
-	packed := before.Pack()
-	after := Unpack(packed).(NominateRequest)
+	packed := before.pack()
+	after := unpack(packed).(nominateRequest)
 	if before != after {
 		t.Errorf("failed to round-trip: expected %#v, got %#v", before, after)
 	}
 }
 
 func TestInformRequest(t *testing.T) {
-	before := InformRequest{
+	before := informRequest{
 		Term:   5,
 		Leader: 23,
 	}
-	packed := before.Pack()
-	after := Unpack(packed).(InformRequest)
+	packed := before.pack()
+	after := unpack(packed).(informRequest)
 	if before != after {
 		t.Errorf("failed to round-trip: expected %#v, got %#v", before, after)
 	}
 }
 
-func equalAppendEntriesRequest(a, b AppendEntriesRequest) bool {
+func equalAppendEntriesRequest(a, b appendEntriesRequest) bool {
 	return (a.Term == b.Term &&
 		a.PrevLogTerm == b.PrevLogTerm &&
 		a.PrevLogIndex == b.PrevLogIndex &&
@@ -100,7 +100,7 @@ func equalAppendEntriesRequest(a, b AppendEntriesRequest) bool {
 		equalEntries(a.Entries, b.Entries))
 }
 
-func equalEntries(a, b []AppendEntry) bool {
+func equalEntries(a, b []appendEntry) bool {
 	if len(a) != len(b) {
 		return false
 	}
