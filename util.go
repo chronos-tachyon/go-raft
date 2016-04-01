@@ -1,13 +1,16 @@
 package raft
 
 import (
+	"encoding/binary"
 	"fmt"
 	"hash/crc32"
 	"net"
 	"sort"
+
+	"github.com/golang/protobuf/proto"
 )
 
-type byId []PeerId
+type byId []uint32
 
 func (x byId) Len() int           { return len(x) }
 func (x byId) Less(i, j int) bool { return x[i] < x[j] }
@@ -25,7 +28,7 @@ func (x byId) Reverse() {
 	}
 }
 
-type byIndex []index
+type byIndex []uint64
 
 func (x byIndex) Len() int           { return len(x) }
 func (x byIndex) Less(i, j int) bool { return x[i] < x[j] }
@@ -57,12 +60,45 @@ func equalUDPAddr(a, b *net.UDPAddr) bool {
 	return a.IP.Equal(b.IP) && a.Port == b.Port && a.Zone == b.Zone
 }
 
-func minIndex(list ...index) index {
+func min(list ...uint64) uint64 {
 	least := list[0]
-	for _, index := range list {
-		if index < least {
-			least = index
+	for _, x := range list {
+		if x < least {
+			least = x
 		}
 	}
 	return least
+}
+
+func mustUnmarshalProto(data []byte, msg proto.Message) {
+	if err := proto.Unmarshal(data, msg); err != nil {
+		panic(err)
+	}
+}
+
+func packData(msg proto.Message) ([]byte, error) {
+	data, err := proto.Marshal(msg)
+	if err != nil {
+		return nil, err
+	}
+	n := len(data)
+	data = append(data, 0, 0, 0, 0)
+	binary.BigEndian.PutUint32(data[n:], crc(data[:n]))
+	return data, nil
+}
+
+func unpackData(data []byte, msg proto.Message) error {
+	if len(data) == 0 {
+		return proto.Unmarshal(nil, msg)
+	}
+	if len(data) < 4 {
+		return fmt.Errorf("truncated data")
+	}
+	n := len(data) - 4
+	expected := binary.BigEndian.Uint32(data[n:])
+	actual := crc(data[:n])
+	if expected != actual {
+		return fmt.Errorf("corrupt data")
+	}
+	return proto.Unmarshal(data[:n], msg)
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -37,6 +38,10 @@ func (sm *stateMachine) Snapshot() []byte {
 }
 
 func (sm *stateMachine) Restore(snapshot []byte) {
+	if len(snapshot) == 0 {
+		*sm = stateMachine{}
+		return
+	}
 	if len(snapshot) != 4 || snapshot[0] != 'x' || snapshot[2] != 'y' {
 		panic("invalid snapshot")
 	}
@@ -60,6 +65,36 @@ func (sm *stateMachine) String() string {
 	return fmt.Sprintf("x:%d y:%d", sm.x, sm.y)
 }
 
+var errNotFound = errors.New("not found")
+
+type memoryStorage map[string][]byte
+
+func (ms memoryStorage) Store(filename string, data []byte) error {
+	ms[filename] = data
+	return nil
+}
+
+func (ms memoryStorage) Retrieve(filename string) ([]byte, error) {
+	data, found := ms[filename]
+	if !found {
+		return nil, errNotFound
+	}
+	return data, nil
+}
+
+func (ms memoryStorage) Delete(filename string) error {
+	_, found := ms[filename]
+	if !found {
+		return errNotFound
+	}
+	delete(ms, filename)
+	return nil
+}
+
+func (ms memoryStorage) IsNotFound(err error) bool {
+	return err == errNotFound
+}
+
 func leader(rafts []*raft.Raft) *raft.Raft {
 	for _, raft := range rafts {
 		if raft.IsLeader() {
@@ -77,7 +112,7 @@ func showRafts(rafts []*raft.Raft) {
 }
 
 type configItem struct {
-	id raft.PeerId
+	id   uint32
 	addr string
 }
 
@@ -92,8 +127,17 @@ var configuration = []configItem{
 func main() {
 	peers := make([]*raft.Raft, 0, len(configuration))
 	for _, item := range configuration {
-		peer, err := raft.New(&stateMachine{}, item.id, item.addr, false)
+		storage := make(memoryStorage)
+		sm := &stateMachine{}
+		peer, err := raft.New(storage, sm, item.id, item.addr)
 		if err != nil {
+			log.Fatalf("fatal: %v", err)
+		}
+		peer.OnGainLeadership(GainLeadership)
+		peer.OnLoseLeadership(LoseLeadership)
+		peer.OnLonely(Lonely)
+		peer.OnNotLonely(NotLonely)
+		if err := peer.Start(); err != nil {
 			log.Fatalf("fatal: %v", err)
 		}
 		peers = append(peers, peer)
@@ -103,15 +147,6 @@ func main() {
 			if p != q {
 				p.AddPeer(q.Id(), q.Addr().String())
 			}
-		}
-	}
-	for _, peer := range peers {
-		peer.OnGainLeadership(GainLeadership)
-		peer.OnLoseLeadership(LoseLeadership)
-		peer.OnLonely(Lonely)
-		peer.OnNotLonely(NotLonely)
-		if err := peer.Start(); err != nil {
-			log.Fatalf("fatal: %v", err)
 		}
 	}
 
@@ -135,7 +170,7 @@ func main() {
 		switch tickCount {
 		case 40:
 			fmt.Println("--- BANG! 1 ---")
-			raft.SetFaultInjectorFunction(func(i, j raft.PeerId) bool {
+			raft.SetFaultInjectorFunction(func(i, j uint32) bool {
 				return (i == 1 && j == 2) || (i == 2 && j == 1)
 			})
 		case 45:
@@ -159,14 +194,8 @@ func main() {
 			raft.SetFaultInjectorFunction(nil)
 		case 200:
 			fmt.Println("--- BANG! 2 ---")
-			raft.SetFaultInjectorFunction(func(i, j raft.PeerId) bool {
-				group := map[raft.PeerId]uint8{
-					1: 1,
-					2: 1,
-					3: 1,
-					4: 2,
-					5: 2,
-				}
+			raft.SetFaultInjectorFunction(func(i, j uint32) bool {
+				group := map[uint32]uint8{1: 1, 2: 1, 3: 1, 4: 2, 5: 2}
 				return group[i] != group[j]
 			})
 		case 315:

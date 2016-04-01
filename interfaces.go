@@ -12,3 +12,10 @@ type StateMachine interface {
 
 	String() string
 }
+
+type Storage interface {
+	Store(filename string, data []byte) error
+	Retrieve(filename string) ([]byte, error)
+	Delete(filename string) error
+	IsNotFound(err error) bool
+}
