@@ -140,11 +140,11 @@ func (raft *Raft) Addr() *net.UDPAddr {
 func (raft *Raft) Peer(id uint32) *net.UDPAddr {
 	raft.mutex.Lock()
 	defer raft.mutex.Unlock()
-	addr, found := raft.peers[id]
+	peer, found := raft.peers[id]
 	if !found {
 		return nil
 	}
-	return addr
+	return peer.addr
 }
 
 // PeerIds returns the IDs of all current peers.
@@ -760,13 +760,13 @@ func (raft *Raft) Tick() {
 	}
 }
 
-func (raft *Raft) becomeFollower(trm uint64, voteFor uint32, leader uint32) {
+func (raft *Raft) becomeFollower(term uint64, voteFor uint32, leader uint32) {
 	raft.state = follower
-	raft.currentTerm = trm
+	raft.currentTerm = term
 	raft.votedForId = voteFor
 	raft.currentLeaderId = leader
 	if leader != 0 {
-		raft.lastLeaderTerm = trm
+		raft.lastLeaderTerm = term
 	}
 	raft.electionTimer = raft.newElectionTimer()
 	raft.heartbeatTimer = 0 // unused
